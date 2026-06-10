@@ -1,5 +1,5 @@
 {
-  "title": "Stoomboot — Details",
+  "title": "Stoomboot \u2014 Details",
   "uid": "stbc-details",
   "tags": [
     "stoomboot",
@@ -76,31 +76,6 @@
         "multi": false,
         "refresh": 2,
         "sort": 1,
-        "hide": 0,
-        "regex": ""
-      },
-      {
-        "name": "job",
-        "type": "query",
-        "label": "Job",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "stbc-prometheus"
-        },
-        "definition": "label_values(stoomboot_job_duration_seconds{cluster=~\"$cluster\", user=~\"$user\"}, job_id)",
-        "query": {
-          "query": "label_values(stoomboot_job_duration_seconds{cluster=~\"$cluster\", user=~\"$user\"}, job_id)",
-          "refId": "jobVar"
-        },
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        },
-        "includeAll": true,
-        "allValue": "--",
-        "multi": false,
-        "refresh": 2,
-        "sort": 2,
         "hide": 0,
         "regex": ""
       }
@@ -500,9 +475,9 @@
       }
     },
     {
-      "id": 7,
+      "id": 8,
       "type": "timeseries",
-      "title": "Running / queued jobs",
+      "title": "Units in use & memory efficiency",
       "datasource": {
         "type": "prometheus",
         "uid": "stbc-prometheus"
@@ -510,7 +485,7 @@
       "gridPos": {
         "x": 0,
         "y": 4,
-        "w": 12,
+        "w": 24,
         "h": 7
       },
       "targets": [
@@ -519,8 +494,8 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "sum(stoomboot_user_jobs_running{cluster=~\"$cluster\", user=~\"$user\"})",
-          "legendFormat": "running",
+          "expr": "sum(stoomboot_user_units_in_use{cluster=~\"$cluster\", user=~\"$user\"})",
+          "legendFormat": "units in use",
           "instant": false,
           "format": "time_series",
           "refId": "A"
@@ -530,8 +505,8 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "sum(stoomboot_user_jobs_queued{cluster=~\"$cluster\", user=~\"$user\"})",
-          "legendFormat": "queued",
+          "expr": "avg(stoomboot_user_memory_efficiency_ratio{cluster=~\"$cluster\", user=~\"$user\"})",
+          "legendFormat": "mem efficiency",
           "instant": false,
           "format": "time_series",
           "refId": "B"
@@ -555,66 +530,28 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "id": 8,
-      "type": "timeseries",
-      "title": "Units in use over time",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "stbc-prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 4,
-        "w": 12,
-        "h": 7
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "stbc-prometheus"
-          },
-          "expr": "sum(stoomboot_user_units_in_use{cluster=~\"$cluster\", user=~\"$user\"})",
-          "legendFormat": "{{user}} units",
-          "instant": false,
-          "format": "time_series",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 10,
-            "showPoints": "never",
-            "stacking": {
-              "mode": "none",
-              "group": "A"
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mem efficiency"
             },
-            "lineWidth": 2
-          },
-          "color": {
-            "mode": "palette-classic"
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Efficiency"
+              }
+            ]
           }
-        },
-        "overrides": []
+        ]
       },
       "options": {
         "legend": {
@@ -908,223 +845,23 @@
       },
       "options": {
         "showHeader": true,
-        "cellHeight": "sm",
+        "cellHeight": "md",
         "footer": {
           "show": false
         }
       }
     },
     {
-      "id": 15,
-      "type": "row",
-      "title": "Selected job detail",
-      "collapsed": false,
+      "id": 24,
+      "type": "timeseries",
+      "title": "Memory used per job (MB)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "stbc-prometheus"
+      },
       "gridPos": {
         "x": 0,
         "y": 21,
-        "w": 24,
-        "h": 1
-      },
-      "panels": []
-    },
-    {
-      "id": 16,
-      "type": "stat",
-      "title": "Runtime",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "stbc-prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 22,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "stbc-prometheus"
-          },
-          "expr": "stoomboot_job_duration_seconds{cluster=~\"$cluster\", user=~\"$user\", job_id=\"$job\"}",
-          "legendFormat": "",
-          "instant": true,
-          "format": "time_series",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "decimals": 0,
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "blue"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              }
-            ]
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "none",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto"
-      }
-    },
-    {
-      "id": 17,
-      "type": "stat",
-      "title": "GPUs requested",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "stbc-prometheus"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 22,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "stbc-prometheus"
-          },
-          "expr": "stoomboot_job_gpus_requested{cluster=~\"$cluster\", user=~\"$user\", job_id=\"$job\"}",
-          "legendFormat": "",
-          "instant": true,
-          "format": "time_series",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto"
-      }
-    },
-    {
-      "id": 18,
-      "type": "stat",
-      "title": "CPUs requested",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "stbc-prometheus"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 22,
-        "w": 8,
-        "h": 4
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "stbc-prometheus"
-          },
-          "expr": "stoomboot_job_cpus_requested{cluster=~\"$cluster\", user=~\"$user\", job_id=\"$job\"}",
-          "legendFormat": "",
-          "instant": true,
-          "format": "time_series",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "mappings": []
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "orientation": "auto"
-      }
-    },
-    {
-      "id": 23,
-      "type": "timeseries",
-      "title": "Memory — requested vs used (MB)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "stbc-prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 26,
         "w": 24,
         "h": 8
       },
@@ -1134,22 +871,11 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "stoomboot_job_memory_requested_mb{cluster=~\"$cluster\", user=~\"$user\", job_id=\"$job\"}",
-          "legendFormat": "Requested (MB)",
+          "expr": "stoomboot_job_memory_usage_mb{cluster=~\"$cluster\", user=~\"$user\"}",
+          "legendFormat": "{{job_id}}",
           "instant": false,
           "format": "time_series",
-          "refId": "R"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "stbc-prometheus"
-          },
-          "expr": "stoomboot_job_memory_usage_mb{cluster=~\"$cluster\", user=~\"$user\", job_id=\"$job\"}",
-          "legendFormat": "Used (MB)",
-          "instant": false,
-          "format": "time_series",
-          "refId": "U"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -1158,7 +884,62 @@
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
-            "fillOpacity": 10,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "lineWidth": 2
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Runtime per job (s)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "stbc-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "stbc-prometheus"
+          },
+          "expr": "stoomboot_job_duration_seconds{cluster=~\"$cluster\", user=~\"$user\"}",
+          "legendFormat": "{{job_id}}",
+          "instant": false,
+          "format": "time_series",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 5,
             "showPoints": "never",
             "lineWidth": 2
           },
@@ -1187,7 +968,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 37,
         "w": 24,
         "h": 1
       },
@@ -1203,7 +984,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 35,
+        "y": 38,
         "w": 8,
         "h": 8
       },
@@ -1265,7 +1046,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 35,
+        "y": 38,
         "w": 8,
         "h": 8
       },
@@ -1327,7 +1108,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 35,
+        "y": 38,
         "w": 8,
         "h": 8
       },
