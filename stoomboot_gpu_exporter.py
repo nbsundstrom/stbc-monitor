@@ -127,6 +127,28 @@ slots_claimed_by_user = Gauge(
     ["cluster", "user", "resource_type", "node"],
 )
 
+# ── Cluster-wide CPU and memory (tracked separately from GPU slot counts) ─────
+cluster_cpus_total = Gauge(
+    "stoomboot_cluster_cpus_total",
+    "Total CPU cores on nodes of this cluster type",
+    ["cluster"],
+)
+cluster_cpus_claimed = Gauge(
+    "stoomboot_cluster_cpus_claimed",
+    "Claimed CPU cores on nodes of this cluster type",
+    ["cluster"],
+)
+cluster_memory_total_mb = Gauge(
+    "stoomboot_cluster_memory_total_mb",
+    "Total memory (MB) on nodes of this cluster type",
+    ["cluster"],
+)
+cluster_memory_claimed_mb = Gauge(
+    "stoomboot_cluster_memory_claimed_mb",
+    "Claimed/allocated memory (MB) on nodes of this cluster type",
+    ["cluster"],
+)
+
 # ── Per-job detail (GPU: everyone; CPU: detail-user only) ────────────────────
 job_duration_seconds = Gauge(
     "stoomboot_job_duration_seconds",
@@ -288,6 +310,8 @@ def _clear_all():
         user_units_in_use, user_memory_efficiency,
         slots_total, slots_claimed_total, slots_idle_total, utilisation_ratio,
         slots_claimed_by_user,
+        cluster_cpus_total, cluster_cpus_claimed,
+        cluster_memory_total_mb, cluster_memory_claimed_mb,
         job_duration_seconds, job_gpus_requested, job_cpus_requested,
         job_memory_requested_mb, job_memory_usage_mb,
     ):
@@ -311,6 +335,7 @@ def scrape(collector_host: str, detail_user: str):
             projection=[
                 "Name", "State", "Activity", "RemoteUser",
                 "Cpus", "TotalCpus",
+                "Memory", "TotalMemory",
                 "GPUs", "GPUs_DeviceName", "TotalGPUs",
                 "SlotType",
             ],
@@ -321,10 +346,16 @@ def scrape(collector_host: str, detail_user: str):
         # gpu_total_by_node: node -> (rtype, total_gpus) — highest seen per node.
         gpu_total_by_node = {}
         gpu_claimed = defaultdict(int)
+        gpu_cpu_total_by_node: dict[str, int] = {}
+        gpu_cpu_claimed = 0
+        gpu_mem_total_by_node: dict[str, int] = {}
+        gpu_mem_claimed = 0
         # cpu accounting: dedupe machine totals so partitionable slots don't
         # multiply TotalCpus; claimed cores summed from Claimed slots.
         cpu_total_by_machine = {}        # node -> TotalCpus (machine cores)
         cpu_claimed = 0
+        cpu_mem_total_by_machine: dict[str, int] = {}
+        cpu_mem_claimed = 0
 
         for ad in slot_ads:
             machine = safe_get(ad, "Name", "unknown")
@@ -334,6 +365,8 @@ def scrape(collector_host: str, detail_user: str):
             total_gpus = safe_int(ad, "TotalGPUs", 0)
             n_cpus = safe_int(ad, "Cpus", 0)
             total_cpus = safe_int(ad, "TotalCpus", 0)
+            n_mem_mb = safe_int(ad, "Memory", 0)
+            total_mem_mb = safe_int(ad, "TotalMemory", 0)
 
             is_gpu = (n_gpus >= 1) or (total_gpus >= 1)
 
@@ -348,10 +381,17 @@ def scrape(collector_host: str, detail_user: str):
                 existing = gpu_total_by_node.get(node)
                 if existing is None or node_total > existing[1]:
                     gpu_total_by_node[node] = (rtype, node_total)
+                # Track CPU and memory capacity of GPU nodes (deduplicated by node)
+                if total_cpus > 0:
+                    gpu_cpu_total_by_node[node] = max(gpu_cpu_total_by_node.get(node, 0), total_cpus)
+                if total_mem_mb > 0:
+                    gpu_mem_total_by_node[node] = max(gpu_mem_total_by_node.get(node, 0), total_mem_mb)
                 # Only count actually-assigned GPUs in claimed slots.
                 if state == "Claimed" and n_gpus >= 1:
                     user = safe_get(ad, "RemoteUser", "unknown").split("@")[0]
                     gpu_claimed[rtype] += n_gpus
+                    gpu_cpu_claimed += n_cpus
+                    gpu_mem_claimed += n_mem_mb
                     slots_claimed_by_user.labels(
                         cluster="gpu", user=user, resource_type=rtype, node=node
                     ).inc(n_gpus)
@@ -361,10 +401,15 @@ def scrape(collector_host: str, detail_user: str):
                     cpu_total_by_machine[node] = max(
                         cpu_total_by_machine.get(node, 0), total_cpus
                     )
+                if total_mem_mb > 0:
+                    cpu_mem_total_by_machine[node] = max(
+                        cpu_mem_total_by_machine.get(node, 0), total_mem_mb
+                    )
                 if state == "Claimed":
                     user = safe_get(ad, "RemoteUser", "unknown").split("@")[0]
                     claimed_cores = max(n_cpus, 1)
                     cpu_claimed += claimed_cores
+                    cpu_mem_claimed += n_mem_mb
                     slots_claimed_by_user.labels(
                         cluster="cpu", user=user, resource_type="CPU", node=node
                     ).inc(claimed_cores)
@@ -398,6 +443,16 @@ def scrape(collector_host: str, detail_user: str):
             utilisation_ratio.labels(cluster="cpu", resource_type="CPU").set(
                 cpu_claimed / cpu_total if cpu_total > 0 else 0.0
             )
+
+        # Publish cluster-wide CPU and memory (both cluster types)
+        cluster_cpus_total.labels(cluster="gpu").set(sum(gpu_cpu_total_by_node.values()))
+        cluster_cpus_claimed.labels(cluster="gpu").set(gpu_cpu_claimed)
+        cluster_memory_total_mb.labels(cluster="gpu").set(sum(gpu_mem_total_by_node.values()))
+        cluster_memory_claimed_mb.labels(cluster="gpu").set(gpu_mem_claimed)
+        cluster_cpus_total.labels(cluster="cpu").set(cpu_total)
+        cluster_cpus_claimed.labels(cluster="cpu").set(cpu_claimed)
+        cluster_memory_total_mb.labels(cluster="cpu").set(sum(cpu_mem_total_by_machine.values()))
+        cluster_memory_claimed_mb.labels(cluster="cpu").set(cpu_mem_claimed)
 
         # ─────────────────────────────────────────────────────────────────────
         # 2. Jobs.  Query ALL jobs from every schedd, bucket gpu vs cpu.

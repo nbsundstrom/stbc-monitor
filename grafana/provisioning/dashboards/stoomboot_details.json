@@ -78,6 +78,31 @@
         "sort": 1,
         "hide": 0,
         "regex": ""
+      },
+      {
+        "name": "job",
+        "type": "query",
+        "label": "Job",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "stbc-prometheus"
+        },
+        "definition": "label_values(stoomboot_job_duration_seconds{cluster=~\"$cluster\", user=~\"$user\"}, job_id)",
+        "query": {
+          "query": "label_values(stoomboot_job_duration_seconds{cluster=~\"$cluster\", user=~\"$user\"}, job_id)",
+          "refId": "jobVar"
+        },
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "regex": ""
       }
     ]
   },
@@ -477,7 +502,7 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Units in use & memory efficiency",
+      "title": "Cluster resource utilisation",
       "datasource": {
         "type": "prometheus",
         "uid": "stbc-prometheus"
@@ -494,8 +519,8 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "sum(stoomboot_user_units_in_use{cluster=~\"$cluster\", user=~\"$user\"})",
-          "legendFormat": "units in use",
+          "expr": "sum(stoomboot_slots_claimed_total{cluster=~\"$cluster\"}) / clamp_min(sum(stoomboot_slots_total{cluster=~\"$cluster\"}),1)",
+          "legendFormat": "GPU utilisation",
           "instant": false,
           "format": "time_series",
           "refId": "A"
@@ -505,16 +530,29 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "avg(stoomboot_user_memory_efficiency_ratio{cluster=~\"$cluster\", user=~\"$user\"})",
-          "legendFormat": "mem efficiency",
+          "expr": "stoomboot_cluster_cpus_claimed{cluster=~\"$cluster\"} / clamp_min(stoomboot_cluster_cpus_total{cluster=~\"$cluster\"},1)",
+          "legendFormat": "CPU utilisation",
           "instant": false,
           "format": "time_series",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "stbc-prometheus"
+          },
+          "expr": "stoomboot_cluster_memory_claimed_mb{cluster=~\"$cluster\"} / clamp_min(stoomboot_cluster_memory_total_mb{cluster=~\"$cluster\"},1)",
+          "legendFormat": "RAM utilisation",
+          "instant": false,
+          "format": "time_series",
+          "refId": "C"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "none",
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
@@ -530,28 +568,7 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "mem efficiency"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "percentunit"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "custom.axisLabel",
-                "value": "Efficiency"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
@@ -720,128 +737,7 @@
             "filterable": true
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Job ID"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 110
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Runtime (s)"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 100
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "GPUs"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 58
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "CPUs"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 58
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Mem req (MB)"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 110
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "node"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Node"
-              },
-              {
-                "id": "custom.width",
-                "value": 110
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "resource_type"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Type"
-              },
-              {
-                "id": "custom.width",
-                "value": 110
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "user"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "User"
-              },
-              {
-                "id": "custom.width",
-                "value": 80
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Mem used (MB)"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 110
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "showHeader": true,
@@ -871,7 +767,7 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "stoomboot_job_memory_usage_mb{cluster=~\"$cluster\", user=~\"$user\"}",
+          "expr": "stoomboot_job_memory_usage_mb{cluster=~\"$cluster\", user=~\"$user\", job_id=~\"$job\"}",
           "legendFormat": "{{job_id}}",
           "instant": false,
           "format": "time_series",
@@ -926,7 +822,7 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "stoomboot_job_duration_seconds{cluster=~\"$cluster\", user=~\"$user\"}",
+          "expr": "stoomboot_job_duration_seconds{cluster=~\"$cluster\", user=~\"$user\", job_id=~\"$job\"}",
           "legendFormat": "{{job_id}}",
           "instant": false,
           "format": "time_series",
