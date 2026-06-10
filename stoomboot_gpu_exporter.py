@@ -172,7 +172,7 @@ job_memory_requested_mb = Gauge(
 )
 job_memory_usage_mb = Gauge(
     "stoomboot_job_memory_usage_mb",
-    "Actual memory used by the job (MB) — from ImageSize ClassAd",
+    "Actual memory used by the job (MB) — from MemoryUsage ClassAd (falls back to ImageSize/1024)",
     ["cluster", "user", "job_id", "resource_type", "node"],
 )
 
@@ -480,7 +480,7 @@ def scrape(collector_host: str, detail_user: str):
                     projection=[
                         "ClusterId", "ProcId", "Owner", "JobStatus",
                         "RequestGPUs", "RequestCpus", "RequestMemory",
-                        "ImageSize", "QDate", "JobStartDate",
+                        "MemoryUsage", "ImageSize", "QDate", "JobStartDate",
                         "RemoteHost", "LastRemoteHost",
                     ],
                 )
@@ -494,8 +494,8 @@ def scrape(collector_host: str, detail_user: str):
                 req_gpus = safe_int(job, "RequestGPUs", 0)
                 req_cpus = safe_int(job, "RequestCpus", 1)
                 req_mem_mb = safe_memory_mb(job, "RequestMemory", 0)
-                image_size_kb = safe_int(job, "ImageSize", 0)
-                actual_mem_mb = image_size_kb / 1024.0
+                # MemoryUsage is directly in MB (HTCondor 8.8+); fall back to ImageSize (KB)/1024
+                actual_mem_mb = float(safe_int(job, "MemoryUsage", 0)) or (safe_int(job, "ImageSize", 0) / 1024.0)
 
                 is_gpu = req_gpus >= 1
                 cluster = "gpu" if is_gpu else "cpu"
