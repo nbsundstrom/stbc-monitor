@@ -821,7 +821,7 @@
     },
     {
       "id": 14,
-      "type": "gauge",
+      "type": "stat",
       "title": "GPU utilisation by type",
       "datasource": {
         "type": "prometheus",
@@ -875,8 +875,6 @@
         "overrides": []
       },
       "options": {
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -884,12 +882,16 @@
           "fields": "",
           "values": false
         },
-        "orientation": "auto"
+        "orientation": "auto",
+        "graphMode": "none",
+        "colorMode": "value",
+        "justifyMode": "auto",
+        "textMode": "auto"
       }
     },
     {
       "id": 15,
-      "type": "gauge",
+      "type": "stat",
       "title": "CPU utilisation",
       "datasource": {
         "type": "prometheus",
@@ -943,8 +945,6 @@
         "overrides": []
       },
       "options": {
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true,
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -952,7 +952,11 @@
           "fields": "",
           "values": false
         },
-        "orientation": "auto"
+        "orientation": "auto",
+        "graphMode": "none",
+        "colorMode": "value",
+        "justifyMode": "auto",
+        "textMode": "auto"
       }
     },
     {
@@ -1123,7 +1127,7 @@
     },
     {
       "id": 20,
-      "type": "bargauge",
+      "type": "table",
       "title": "GPUs held per user (live)",
       "datasource": {
         "type": "prometheus",
@@ -1171,21 +1175,25 @@
         "overrides": []
       },
       "options": {
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "showUnfilled": true,
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
           ],
-          "fields": "",
-          "values": false
+          "countRows": false,
+          "enablePagination": false
         }
       }
     },
     {
       "id": 21,
-      "type": "bargauge",
+      "type": "table",
       "title": "GPU-hours in flight per user",
       "datasource": {
         "type": "prometheus",
@@ -1233,15 +1241,19 @@
         "overrides": []
       },
       "options": {
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "showUnfilled": true,
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
+        "sortBy": [
+          {
+            "displayName": "Value",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
           ],
-          "fields": "",
-          "values": false
+          "countRows": false,
+          "enablePagination": false
         }
       }
     }

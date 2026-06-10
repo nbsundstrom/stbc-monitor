@@ -316,8 +316,10 @@ def scrape(collector_host: str, detail_user: str):
             ],
         )
 
-        # gpu accounting: per resource_type
-        gpu_total = defaultdict(int)
+        # gpu accounting: deduplicate totals by node so partitionable + dynamic
+        # child slots don't each contribute TotalGPUs to the sum.
+        # gpu_total_by_node: node -> (rtype, total_gpus) — highest seen per node.
+        gpu_total_by_node = {}
         gpu_claimed = defaultdict(int)
         # cpu accounting: dedupe machine totals so partitionable slots don't
         # multiply TotalCpus; claimed cores summed from Claimed slots.
@@ -339,14 +341,20 @@ def scrape(collector_host: str, detail_user: str):
                 rtype = normalise_device_name(
                     safe_get(ad, "GPUs_DeviceName", ""), gpu_type_for_node(node)
                 )
-                gpu_total[rtype] += max(total_gpus, n_gpus)
-                if state == "Claimed":
+                # Record the highest total seen for this node (TotalGPUs stays
+                # stable across all slot ads for the node; n_gpus may shrink as
+                # dynamic slots are carved out).
+                node_total = max(total_gpus, n_gpus)
+                existing = gpu_total_by_node.get(node)
+                if existing is None or node_total > existing[1]:
+                    gpu_total_by_node[node] = (rtype, node_total)
+                # Only count actually-assigned GPUs in claimed slots.
+                if state == "Claimed" and n_gpus >= 1:
                     user = safe_get(ad, "RemoteUser", "unknown").split("@")[0]
-                    claimed_units = max(n_gpus, 1)
-                    gpu_claimed[rtype] += claimed_units
+                    gpu_claimed[rtype] += n_gpus
                     slots_claimed_by_user.labels(
                         cluster="gpu", user=user, resource_type=rtype, node=node
-                    ).inc(claimed_units)
+                    ).inc(n_gpus)
             else:
                 # CPU machine: record machine core total once (max seen)
                 if total_cpus > 0:
@@ -360,6 +368,11 @@ def scrape(collector_host: str, detail_user: str):
                     slots_claimed_by_user.labels(
                         cluster="cpu", user=user, resource_type="CPU", node=node
                     ).inc(claimed_cores)
+
+        # Collapse per-node totals into per-rtype totals
+        gpu_total: dict[str, int] = defaultdict(int)
+        for _node, (rtype, total) in gpu_total_by_node.items():
+            gpu_total[rtype] += total
 
         # Publish GPU slot stats
         for rtype, total in gpu_total.items():
