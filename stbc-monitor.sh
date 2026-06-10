@@ -51,7 +51,13 @@ error() { echo -e "${RED}[local]${NC} $*" >&2; }
 
 # ── SSH plumbing ──────────────────────────────────────────────────────────────
 SSH_TARGET="${SSH_USER}@${SSH_HOST}"
-ssh_opts=()
+# Multiplex all SSH connections through one socket — one handshake, no repeated warnings
+_SSH_CTL="${TMPDIR:-/tmp}/stbc-${SSH_USER}@${SSH_HOST}.sock"
+ssh_opts=(
+    -o "ControlMaster=auto"
+    -o "ControlPath=${_SSH_CTL}"
+    -o "ControlPersist=60"
+)
 [[ -n "$SSH_JUMP" ]] && ssh_opts+=(-J "${SSH_USER}@${SSH_JUMP}")
 
 remote() {
@@ -73,10 +79,11 @@ deploy() {
         "
     else
         info "Deploying via rsync ${LOCAL_DIR}/ → ${SSH_TARGET}:${REMOTE_DIR}/"
-        local ssh_cmd="ssh"
-        [[ -n "$SSH_JUMP" ]] && ssh_cmd="ssh -J ${SSH_USER}@${SSH_JUMP}"
-        remote "mkdir -p '${REMOTE_DIR}'"
+        # --rsync-path creates the remote dir and starts rsync in one SSH call
+        local ssh_cmd="ssh -o ControlMaster=auto -o ControlPath=${_SSH_CTL} -o ControlPersist=60"
+        [[ -n "$SSH_JUMP" ]] && ssh_cmd+=" -J ${SSH_USER}@${SSH_JUMP}"
         rsync -az --delete \
+            --rsync-path="mkdir -p '${REMOTE_DIR}' && rsync" \
             --exclude '.git' \
             --exclude '*.sif' \
             --exclude '.apptainer' \
@@ -283,7 +290,7 @@ case "$ACTION" in
             info "All services stopped."
         }
         trap '_cleanup; exit 0' INT TERM
-        ( sleep 4; open_browser "http://localhost:${PORT_GRAFANA}/d/stbc-overview" ) &
+        ( sleep 4; open_browser "http://localhost:${PORT_GRAFANA}/d/stbc-details" ) &
         # Tunnel only Prometheus — Grafana runs locally
         ssh ${ssh_opts[@]+"${ssh_opts[@]}"} -N \
             -L "${PORT_PROMETHEUS}:localhost:${PORT_PROMETHEUS}" \

@@ -756,6 +756,7 @@
               "instance 2": true,
               "instance 3": true,
               "instance 4": true,
+              "job": true,
               "job 1": true,
               "job 2": true,
               "job 3": true,
@@ -766,11 +767,11 @@
               "job_id": "Job ID",
               "resource_type": "Type",
               "node": "Node",
-              "Value": "Runtime (s)",
-              "Value 1": "GPUs",
-              "Value 2": "CPUs",
-              "Value 3": "Mem req (MB)",
-              "Value 4": "Mem used (MB)"
+              "Value #A": "Runtime (s)",
+              "Value #B": "GPUs",
+              "Value #C": "CPUs",
+              "Value #D": "Mem req (MB)",
+              "Value #E": "Mem used (MB)"
             }
           }
         }
