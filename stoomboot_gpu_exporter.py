@@ -175,6 +175,11 @@ job_memory_usage_mb = Gauge(
     "Actual memory used by the job (MB) — from MemoryUsage ClassAd (falls back to ImageSize/1024)",
     ["cluster", "user", "job_id", "resource_type", "node"],
 )
+job_cpu_efficiency = Gauge(
+    "stoomboot_job_cpu_efficiency",
+    "CPU efficiency ratio: TotalJobRunningCpuUsage / (duration_s × requested_cpus); 1.0 = fully utilising requested cores",
+    ["cluster", "user", "job_id", "resource_type", "node"],
+)
 
 # ── Exporter health (for the 'targets online' / freshness tiles) ─────────────
 exporter_up = Gauge(
@@ -313,7 +318,7 @@ def _clear_all():
         cluster_cpus_total, cluster_cpus_claimed,
         cluster_memory_total_mb, cluster_memory_claimed_mb,
         job_duration_seconds, job_gpus_requested, job_cpus_requested,
-        job_memory_requested_mb, job_memory_usage_mb,
+        job_memory_requested_mb, job_memory_usage_mb, job_cpu_efficiency,
     ):
         g.clear()
 
@@ -480,7 +485,9 @@ def scrape(collector_host: str, detail_user: str):
                     projection=[
                         "ClusterId", "ProcId", "Owner", "JobStatus",
                         "RequestGPUs", "RequestCpus", "RequestMemory",
-                        "MemoryUsage", "ImageSize", "QDate", "JobStartDate",
+                        "MemoryUsage", "ImageSize",
+                        "TotalJobRunningCpuUsage",
+                        "QDate", "JobStartDate",
                         "RemoteHost", "LastRemoteHost",
                     ],
                 )
@@ -527,11 +534,14 @@ def scrape(collector_host: str, detail_user: str):
                         job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
                         lbl = dict(cluster=cluster, user=owner, job_id=job_id,
                                    resource_type=rtype, node=node)
+                        cpu_secs_used = safe_int(job, "TotalJobRunningCpuUsage", 0)
+                        cpu_eff = cpu_secs_used / max(duration * max(req_cpus, 1), 1e-6)
                         job_duration_seconds.labels(**lbl).set(duration)
                         job_gpus_requested.labels(**lbl).set(req_gpus)
                         job_cpus_requested.labels(**lbl).set(req_cpus)
                         job_memory_requested_mb.labels(**lbl).set(req_mem_mb)
                         job_memory_usage_mb.labels(**lbl).set(actual_mem_mb)
+                        job_cpu_efficiency.labels(**lbl).set(cpu_eff)
 
                 elif status == 1:  # Idle / queued
                     acc_queued[key] += 1
