@@ -19,3 +19,6 @@ __pycache__/
 .vscode/
 *.swp
 *~
+
+# macOS
+.DS_Store
