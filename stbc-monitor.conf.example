@@ -1,0 +1,39 @@
+# stbc-monitor.conf.example
+# ---------------------------------------------------------------------------
+# Copy this to ~/.stbc-monitor.conf and edit. The local wrapper sources it,
+# so you set your cluster details once and never touch the script itself.
+#
+#   cp stbc-monitor.conf.example ~/.stbc-monitor.conf
+#   $EDITOR ~/.stbc-monitor.conf
+# ---------------------------------------------------------------------------
+
+# Your cluster username
+SSH_USER="nsundstr"
+
+# The host that will run the monitoring server. login.nikhef.nl is reachable
+# directly and stays up, so no jump host is needed.
+SSH_HOST="login.nikhef.nl"
+
+# Bastion / login host to hop through to reach SSH_HOST from outside Nikhef.
+# Empty = connect directly (the default, since login.nikhef.nl needs no hop).
+# Set this only if SSH_HOST is an internal node reachable solely via a bastion
+# (and you don't already have a matching ProxyJump block in ~/.ssh/config).
+SSH_JUMP=""
+
+# Where the repo lives on the cluster (on /data/alice group storage).
+REMOTE_DIR="/data/alice/nsundstr/stbc-monitor"
+
+# Your condor username. Pinned as the default in the Grafana "User" dropdown
+# (so you're the default view) and used for CPU per-job detail. If unset it
+# falls back to SSH_USER.
+CLUSTER_USER="nsundstr"
+
+# How the cluster copy gets updated:
+#   - Set REPO_URL to your git remote  → the cluster runs `git pull`.
+#   - Leave it empty                   → the wrapper rsyncs your local copy up.
+REPO_URL=""
+# REPO_URL="ssh://git@gitlab.cern.ch:7999/nsundstr/stbc-monitor.git"
+
+# Local ports for the SSH tunnel (what you open in your browser).
+PORT_GRAFANA="3000"
+PORT_PROMETHEUS="9090"

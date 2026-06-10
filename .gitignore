@@ -1,0 +1,21 @@
+# Apptainer images (large, re-pulled by setup.sh)
+*.sif
+
+# Runtime data
+prom_data/
+grafana_data/
+grafana_data_local/
+logs/
+pids/
+.apptainer/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Editor
+.vscode/
+*.swp
+*~

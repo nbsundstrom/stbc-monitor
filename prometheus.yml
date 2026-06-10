@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 15s      # match --interval on the exporter (live-ish data)
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "stoomboot"
+    static_configs:
+      - targets: ["localhost:9118"]   # adjust if exporter runs on another host/port
