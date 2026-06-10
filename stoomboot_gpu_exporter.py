@@ -18,7 +18,7 @@ Exposes:
 
 Usage:
     python stoomboot_gpu_exporter.py [--port 9118] [--collector stbc-019.nikhef.nl]
-                                     [--interval 15] [--detail-user nsundstr]
+                                     [--interval 15] [--detail-user your_username]
 
 Requirements:
     pip install prometheus_client htcondor
@@ -524,8 +524,8 @@ def main():
                         help="HTCondor collector hostname (default: stbc-019.nikhef.nl)")
     parser.add_argument("--interval", type=int, default=15,
                         help="Scrape interval in seconds (default: 15)")
-    parser.add_argument("--detail-user", type=str, default="nsundstr",
-                        help="User whose CPU jobs get per-job detail (default: nsundstr). "
+    parser.add_argument("--detail-user", type=str, default="your_username",
+                        help="User whose CPU jobs get per-job detail (default: your_username). "
                              "GPU per-job detail is always emitted for everyone.")
     args = parser.parse_args()
 

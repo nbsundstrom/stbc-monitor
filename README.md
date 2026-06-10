@@ -80,10 +80,10 @@ ever touch the wrapper (`stbc-monitor.sh`).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `SSH_USER` | `nsundstr` | Cluster username |
+| `SSH_USER` | `your_username` | Cluster username |
 | `SSH_HOST` | `login.nikhef.nl` | Host that runs the server |
 | `SSH_JUMP` | *(empty)* | Bastion to hop through — empty means connect directly (set only for an internal-only host) |
-| `REMOTE_DIR` | `/data/alice/nsundstr/stbc-monitor` | Repo location on the cluster |
+| `REMOTE_DIR` | `/data/your_group/your_username/stbc-monitor` | Repo location on the cluster |
 | `REPO_URL` | *(empty)* | Git remote - if set, cluster does `git pull`; if empty, wrapper rsyncs your local copy |
 | `CLUSTER_USER` | *(= SSH_USER)* | Your condor username — pinned as the Grafana user-dropdown default and used for CPU per-job detail |
 | `PORT_GRAFANA` | `3000` | Local browser port |
@@ -134,7 +134,7 @@ You don't need this for normal use, but if you ssh in yourself, `setup.sh` is
 the engine:
 
 ```bash
-cd /data/alice/nsundstr/stbc-monitor
+cd /data/your_group/your_username/stbc-monitor
 bash setup.sh                 # build (if needed) + start services
 bash setup.sh --build-only    # env + images only, no services
 bash setup.sh --restart       # force-restart
@@ -149,10 +149,8 @@ bash setup.sh --status
 | `--collector` | `stbc-019.nikhef.nl` | HTCondor collector host |
 | `--port-exporter` | `9118` | Prometheus metrics endpoint |
 | `--port-prometheus` | `9090` | Prometheus web UI |
-| `--port-grafana` | `3000` | Grafana web UI |
 | `--interval` | `15` | Exporter scrape interval (seconds) |
-| `--password` | `stbc_monitor` | Grafana admin password |
-| `--default-user` | `nsundstr` | Pinned as Grafana user-dropdown default; CPU per-job detail user |
+| `--default-user` | `your_username` | Pinned as Grafana user-dropdown default; CPU per-job detail user |
 | `--build-only` | - | Build env + pull images, don't start services |
 | `--restart` | - | Force-restart instead of leaving running services as-is |
 | `--stop` / `--status` | - | Stop / show status |

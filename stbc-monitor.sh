@@ -24,10 +24,10 @@
 set -euo pipefail
 
 # ── Defaults (override via env or ~/.stbc-monitor.conf) ───────────────────────
-SSH_USER="${STBC_SSH_USER:-nsundstr}"
+SSH_USER="${STBC_SSH_USER:-your_username}"
 SSH_HOST="${STBC_SSH_HOST:-login.nikhef.nl}"
 SSH_JUMP="${STBC_SSH_JUMP-}"
-REMOTE_DIR="${STBC_REMOTE_DIR:-/data/alice/nsundstr/stbc-monitor}"
+REMOTE_DIR="${STBC_REMOTE_DIR:-/data/your_group/your_username/stbc-monitor}"
 REPO_URL="${STBC_REPO_URL:-}"
 CLUSTER_USER="${STBC_CLUSTER_USER:-}"
 PORT_GRAFANA="${STBC_PORT_GRAFANA:-3000}"
@@ -255,17 +255,17 @@ case "$ACTION" in
         info "and installs Grafana locally via Homebrew."
         ensure_grafana_installed
         deploy
-        remote "cd '${REMOTE_DIR}' && bash setup.sh --build-only --skip-grafana \
+        remote "cd '${REMOTE_DIR}' && bash setup.sh --build-only \
             --default-user '${CLUSTER_USER}'"
         echo ""
-        info "Setup done. Run ./stbc-monitor-local-grafana.sh to start monitoring."
+        info "Setup done. Run ./stbc-monitor.sh to start monitoring."
         ;;
 
     start)
         ensure_grafana_installed
         deploy
         info "Ensuring cluster services are running (exporter + Prometheus)..."
-        remote "cd '${REMOTE_DIR}' && bash setup.sh --skip-grafana \
+        remote "cd '${REMOTE_DIR}' && bash setup.sh \
             --port-prometheus ${PORT_PROMETHEUS} \
             --default-user '${CLUSTER_USER}'"
         start_local_grafana
@@ -273,25 +273,32 @@ case "$ACTION" in
         info "Opening SSH tunnel:  localhost:${PORT_PROMETHEUS} → cluster Prometheus"
         info "Grafana login: admin / stbc_monitor"
         echo ""
-        info "Browser will open shortly. Press Ctrl-C to close the tunnel."
-        info "(Local Grafana keeps running after you disconnect.)"
-        warn "To stop Grafana: ./stbc-monitor-local-grafana.sh --stop"
+        info "Browser will open shortly. Press Ctrl-C to stop everything."
         echo ""
+        _cleanup() {
+            echo ""
+            info "Stopping all services..."
+            remote "cd '${REMOTE_DIR}' && bash setup.sh --stop" || true
+            stop_local_grafana
+            info "All services stopped."
+        }
+        trap '_cleanup; exit 0' INT TERM
         ( sleep 4; open_browser "http://localhost:${PORT_GRAFANA}/d/stbc-overview" ) &
         # Tunnel only Prometheus — Grafana runs locally
         ssh ${ssh_opts[@]+"${ssh_opts[@]}"} -N \
             -L "${PORT_PROMETHEUS}:localhost:${PORT_PROMETHEUS}" \
-            "$SSH_TARGET"
+            "$SSH_TARGET" || true
+        trap - INT TERM
         ;;
 
     restart)
         deploy
-        remote "cd '${REMOTE_DIR}' && bash setup.sh --restart --skip-grafana \
+        remote "cd '${REMOTE_DIR}' && bash setup.sh --restart \
             --port-prometheus ${PORT_PROMETHEUS} \
             --default-user '${CLUSTER_USER}'"
         stop_local_grafana
         start_local_grafana
-        info "Services restarted. Run ./stbc-monitor-local-grafana.sh to view."
+        info "Services restarted. Run ./stbc-monitor.sh to view."
         ;;
 
     stop)

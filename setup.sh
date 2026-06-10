@@ -17,7 +17,7 @@
 #   bash setup.sh --stop
 #
 # Usage:
-#   bash setup.sh [--port-exporter 9118] [--port-prometheus 9090] [--port-grafana 3000]
+#   bash setup.sh [--port-exporter 9118] [--port-prometheus 9090]
 #                 [--collector stbc-019.nikhef.nl] [--interval 60]
 #                 [--stop] [--status]
 # =============================================================================
@@ -35,26 +35,20 @@ if command -v condor_config_val &>/dev/null; then
 fi
 PORT_EXPORTER=9118
 PORT_PROMETHEUS=9090
-PORT_GRAFANA=3000
 INTERVAL=15
-GRAFANA_PASSWORD="stbc_monitor"
-DEFAULT_USER="nsundstr"   # pinned as the default in the Grafana user dropdown,
-                          # and the user whose CPU jobs get per-job detail
+DEFAULT_USER="your_username"  # pinned as the default in the Grafana user dropdown,
+                               # and the user whose CPU jobs get per-job detail
 
 PROM_SIF="${REPO_DIR}/prometheus.sif"
-GRAFANA_SIF="${REPO_DIR}/grafana.sif"
 PROM_DATA="${REPO_DIR}/prom_data"
-GRAFANA_DATA="${REPO_DIR}/grafana_data"
 LOG_DIR="${REPO_DIR}/logs"
 PID_DIR="${REPO_DIR}/pids"
 
 EXPORTER_LOG="${LOG_DIR}/exporter.log"
 PROMETHEUS_LOG="${LOG_DIR}/prometheus.log"
-GRAFANA_LOG="${LOG_DIR}/grafana.log"
 
 EXPORTER_PID="${PID_DIR}/exporter.pid"
 PROMETHEUS_PID="${PID_DIR}/prometheus.pid"
-GRAFANA_PID="${PID_DIR}/grafana.pid"
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -66,20 +60,16 @@ section() { echo -e "\n${BLUE}══ $* ${NC}"; }
 # ── Argument parsing ──────────────────────────────────────────────────────────
 ACTION="start"
 FORCE_RESTART=false
-SKIP_GRAFANA=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stop)             ACTION="stop"; shift ;;
         --status)           ACTION="status"; shift ;;
         --build-only)       ACTION="build"; shift ;;
         --restart)          FORCE_RESTART=true; shift ;;
-        --skip-grafana)     SKIP_GRAFANA=true; shift ;;
         --collector)        COLLECTOR="$2"; shift 2 ;;
         --port-exporter)    PORT_EXPORTER="$2"; shift 2 ;;
         --port-prometheus)  PORT_PROMETHEUS="$2"; shift 2 ;;
-        --port-grafana)     PORT_GRAFANA="$2"; shift 2 ;;
         --interval)         INTERVAL="$2"; shift 2 ;;
-        --password)         GRAFANA_PASSWORD="$2"; shift 2 ;;
         --python)           PYTHON_BIN="$2"; shift 2 ;;
         --default-user)     DEFAULT_USER="$2"; shift 2 ;;
         *) error "Unknown argument: $1"; exit 1 ;;
@@ -120,7 +110,6 @@ if [[ "$ACTION" == "stop" ]]; then
     section "Stopping all processes"
     stop_process "exporter"    "$EXPORTER_PID"
     stop_process "prometheus"  "$PROMETHEUS_PID"
-    stop_process "grafana"     "$GRAFANA_PID"
     info "Done."
     exit 0
 fi
@@ -128,7 +117,7 @@ fi
 # ── --status ──────────────────────────────────────────────────────────────────
 if [[ "$ACTION" == "status" ]]; then
     section "Process status"
-    for proc in exporter prometheus grafana; do
+    for proc in exporter prometheus; do
         pidvar="${proc^^}_PID"  # exporter -> EXPORTER_PID
         pidfile="${PID_DIR}/${proc}.pid"
         if is_running "$pidfile"; then
@@ -152,14 +141,14 @@ echo "  ║   Stoomboot Monitor — setup.sh           ║"
 echo "  ╚══════════════════════════════════════════╝"
 echo "  Repo:      ${REPO_DIR}"
 echo "  Collector: ${COLLECTOR}"
-echo "  Ports:     exporter=${PORT_EXPORTER}  prometheus=${PORT_PROMETHEUS}  grafana=${PORT_GRAFANA}"
+echo "  Ports:     exporter=${PORT_EXPORTER}  prometheus=${PORT_PROMETHEUS}"
 echo ""
 
-mkdir -p "$PROM_DATA" "$GRAFANA_DATA" "$LOG_DIR" "$PID_DIR"
+mkdir -p "$PROM_DATA" "$LOG_DIR" "$PID_DIR"
 
 # ── Preflight: storage must be writable ───────────────────────────────────────
 # Turns a confusing deep error ("/data ... is not writable") into a clear,
-# actionable one that names the exact path. Group storage (/data/alice) can be
+# actionable one that names the exact path. Group storage (/data/your_group) can be
 # mounted read-only on some hosts.
 check_writable() {
     local d="$1" label="$2"
@@ -251,27 +240,6 @@ else
     apptainer --silent pull "${PROM_SIF}" docker://prom/prometheus:latest
 fi
 
-if [[ "$SKIP_GRAFANA" == "false" ]]; then
-    if [[ -f "$GRAFANA_SIF" ]]; then
-        info "grafana.sif already present — skipping pull"
-    else
-        info "Pulling Grafana image (this takes a minute)..."
-        apptainer pull "${GRAFANA_SIF}" docker://grafana/grafana:latest
-    fi
-
-    # Copy dashboard JSONs into grafana_data, substituting the default-user
-    # placeholder so your username is pinned as the dropdown default.
-    mkdir -p "${GRAFANA_DATA}/dashboards"
-    for dash in "${REPO_DIR}/grafana/provisioning/dashboards/"*.json; do
-        [[ -e "$dash" ]] || continue
-        sed "s/__DEFAULT_USER__/${DEFAULT_USER}/g" "$dash" \
-            > "${GRAFANA_DATA}/dashboards/$(basename "$dash")"
-    done
-    info "Provisioned dashboards (default user: ${DEFAULT_USER})"
-else
-    info "Skipping Grafana (--skip-grafana)"
-fi
-
 # ── --build-only stops here (one-time setup: env + images, no services) ───────
 if [[ "$ACTION" == "build" ]]; then
     echo ""
@@ -330,21 +298,6 @@ launch "prometheus" "$PROMETHEUS_PID" "$PROMETHEUS_LOG" \
             --storage.tsdb.path=/prometheus \
             --web.listen-address=":${PORT_PROMETHEUS}"
 
-sleep 2
-
-# 4c. Grafana
-if [[ "$SKIP_GRAFANA" == "false" ]]; then
-    launch "grafana" "$GRAFANA_PID" "$GRAFANA_LOG" \
-        apptainer --silent run \
-            --no-home \
-            --bind "${GRAFANA_DATA}:/var/lib/grafana" \
-            --bind "${REPO_DIR}/grafana/provisioning:/etc/grafana/provisioning" \
-            --bind "${GRAFANA_DATA}/dashboards:/var/lib/grafana/dashboards" \
-            --env GF_SECURITY_ADMIN_PASSWORD="${GRAFANA_PASSWORD}" \
-            --env GF_SERVER_HTTP_PORT="${PORT_GRAFANA}" \
-            --env GF_PATHS_PROVISIONING=/etc/grafana/provisioning \
-            "${GRAFANA_SIF}"
-fi
 
 # ── Step 4: Health check ──────────────────────────────────────────────────────
 section "Step 4: Health check"
@@ -366,15 +319,6 @@ else
     HEALTHY=false
 fi
 
-if [[ "$SKIP_GRAFANA" == "false" ]]; then
-    if curl -sf "http://localhost:${PORT_GRAFANA}/api/health" > /dev/null; then
-        info "Grafana OK — :${PORT_GRAFANA}"
-    else
-        warn "Grafana not yet responding on :${PORT_GRAFANA} — check ${GRAFANA_LOG}"
-        HEALTHY=false
-    fi
-fi
-
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "  ╔══════════════════════════════════════════════════════════════╗"
@@ -386,8 +330,7 @@ echo ""
 echo "  The local wrapper (stbc-monitor.sh) handles the SSH tunnel and"
 echo "  opens Grafana for you. If you're driving setup.sh directly on the"
 echo "  cluster instead, tunnel manually:"
-echo "    ssh -L ${PORT_GRAFANA}:localhost:${PORT_GRAFANA} -L ${PORT_PROMETHEUS}:localhost:${PORT_PROMETHEUS} ${USER}@$(hostname -f 2>/dev/null || hostname)"
-echo "    then open http://localhost:${PORT_GRAFANA}  (admin / ${GRAFANA_PASSWORD})"
+echo "    ssh -L ${PORT_PROMETHEUS}:localhost:${PORT_PROMETHEUS} ${USER}@$(hostname -f 2>/dev/null || hostname)"
 echo ""
 echo "  Stop:   bash ${BASH_SOURCE[0]} --stop"
 echo "  Status: bash ${BASH_SOURCE[0]} --status"

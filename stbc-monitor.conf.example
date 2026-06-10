@@ -8,7 +8,7 @@
 # ---------------------------------------------------------------------------
 
 # Your cluster username
-SSH_USER="nsundstr"
+SSH_USER="your_username"
 
 # The host that will run the monitoring server. login.nikhef.nl is reachable
 # directly and stays up, so no jump host is needed.
@@ -20,19 +20,19 @@ SSH_HOST="login.nikhef.nl"
 # (and you don't already have a matching ProxyJump block in ~/.ssh/config).
 SSH_JUMP=""
 
-# Where the repo lives on the cluster (on /data/alice group storage).
-REMOTE_DIR="/data/alice/nsundstr/stbc-monitor"
+# Where the repo lives on the cluster (on group storage, e.g. /data/your_group).
+REMOTE_DIR="/data/your_group/your_username/stbc-monitor"
 
 # Your condor username. Pinned as the default in the Grafana "User" dropdown
 # (so you're the default view) and used for CPU per-job detail. If unset it
 # falls back to SSH_USER.
-CLUSTER_USER="nsundstr"
+CLUSTER_USER="your_username"
 
 # How the cluster copy gets updated:
 #   - Set REPO_URL to your git remote  → the cluster runs `git pull`.
 #   - Leave it empty                   → the wrapper rsyncs your local copy up.
 REPO_URL=""
-# REPO_URL="ssh://git@gitlab.cern.ch:7999/nsundstr/stbc-monitor.git"
+# REPO_URL="ssh://git@gitlab.cern.ch:7999/your_username/stbc-monitor.git"
 
 # Local ports for the SSH tunnel (what you open in your browser).
 PORT_GRAFANA="3000"
