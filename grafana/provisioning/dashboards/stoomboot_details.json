@@ -549,9 +549,9 @@
       },
       "options": {
         "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": ["lastNotNull"]
         },
         "tooltip": {
           "mode": "multi",
@@ -630,17 +630,6 @@
           "instant": true,
           "format": "table",
           "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "stbc-prometheus"
-          },
-          "expr": "stoomboot_job_memory_usage_mb{cluster=~\"$cluster\", user=~\"$user\"}",
-          "legendFormat": "",
-          "instant": true,
-          "format": "table",
-          "refId": "E"
         }
       ],
       "transformations": [
@@ -701,8 +690,7 @@
               "Value #A": "Runtime (s)",
               "Value #B": "GPUs",
               "Value #C": "CPUs",
-              "Value #D": "Mem req (MB)",
-              "Value #E": "Mem used (MB)"
+              "Value #D": "Mem req (MB)"
             }
           }
         }
@@ -727,7 +715,7 @@
     {
       "id": 24,
       "type": "timeseries",
-      "title": "Memory used per job (MB)",
+      "title": "Resource usage per job",
       "datasource": {
         "type": "prometheus",
         "uid": "stbc-prometheus"
@@ -744,66 +732,33 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "stoomboot_job_memory_usage_mb{cluster=~\"$cluster\", user=~\"$user\", job_id=~\"$job\"}",
-          "legendFormat": "{{job_id}}",
+          "expr": "stoomboot_job_memory_usage_mb{cluster=~\"$cluster\", user=~\"$user\", job_id=~\"$job\"} / clamp_min(stoomboot_job_memory_requested_mb{cluster=~\"$cluster\", user=~\"$user\", job_id=~\"$job\"}, 1)",
+          "legendFormat": "{{job_id}} · mem",
           "instant": false,
           "format": "time_series",
           "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 5,
-            "showPoints": "never",
-            "lineWidth": 2
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
         },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "id": 26,
-      "type": "timeseries",
-      "title": "CPU efficiency per job (used / requested)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "stbc-prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 29,
-        "w": 24,
-        "h": 8
-      },
-      "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
           "expr": "stoomboot_job_cpu_efficiency{cluster=~\"$cluster\", user=~\"$user\", job_id=~\"$job\"}",
-          "legendFormat": "{{job_id}}",
+          "legendFormat": "{{job_id}} · CPU",
           "instant": false,
           "format": "time_series",
-          "refId": "A"
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "stbc-prometheus"
+          },
+          "expr": "stoomboot_job_gpus_requested{cluster=~\"$cluster\", user=~\"$user\", job_id=~\"$job\"}",
+          "legendFormat": "{{job_id}} · GPUs",
+          "instant": false,
+          "format": "time_series",
+          "refId": "C"
         }
       ],
       "fieldConfig": {
@@ -821,7 +776,17 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": ".* · GPUs"},
+            "properties": [
+              {"id": "unit", "value": "none"},
+              {"id": "custom.axisPlacement", "value": "right"},
+              {"id": "custom.axisLabel", "value": "GPUs"},
+              {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [8, 4]}}
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -845,9 +810,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 37,
+        "y": 29,
         "w": 12,
-        "h": 8
+        "h": 6
       },
       "targets": [
         {
@@ -881,9 +846,9 @@
         "overrides": []
       },
       "options": {
-        "displayMode": "gradient",
+        "displayMode": "basic",
         "orientation": "horizontal",
-        "showUnfilled": true,
+        "showUnfilled": false,
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -903,9 +868,9 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 37,
+        "y": 29,
         "w": 12,
-        "h": 8
+        "h": 6
       },
       "targets": [
         {
@@ -948,9 +913,9 @@
         "overrides": []
       },
       "options": {
-        "displayMode": "gradient",
+        "displayMode": "basic",
         "orientation": "horizontal",
-        "showUnfilled": true,
+        "showUnfilled": false,
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -967,7 +932,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 45,
+        "y": 35,
         "w": 24,
         "h": 1
       },
@@ -983,7 +948,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 36,
         "w": 8,
         "h": 8
       },
@@ -1045,7 +1010,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 46,
+        "y": 36,
         "w": 8,
         "h": 8
       },
@@ -1107,7 +1072,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 46,
+        "y": 36,
         "w": 8,
         "h": 8
       },
