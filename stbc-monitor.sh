@@ -277,7 +277,7 @@ case "$ACTION" in
         info "(Local Grafana keeps running after you disconnect.)"
         warn "To stop Grafana: ./stbc-monitor-local-grafana.sh --stop"
         echo ""
-        ( sleep 4; open_browser "http://localhost:${PORT_GRAFANA}" ) &
+        ( sleep 4; open_browser "http://localhost:${PORT_GRAFANA}/d/stbc-overview" ) &
         # Tunnel only Prometheus — Grafana runs locally
         ssh ${ssh_opts[@]+"${ssh_opts[@]}"} -N \
             -L "${PORT_PROMETHEUS}:localhost:${PORT_PROMETHEUS}" \
