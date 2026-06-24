@@ -126,57 +126,11 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
     },
     {
-      "id": 4,
-      "type": "timeseries",
-      "title": "GPU utilization",
-      "datasource": { "type": "prometheus", "uid": "stbc-prometheus" },
-      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 9 },
-      "targets": [{
-        "datasource": { "type": "prometheus", "uid": "stbc-prometheus" },
-        "expr": "stoomboot_job_gpu_utilization_pct{user=\"__DEFAULT_USER__\", cluster=\"$cluster\", job_id=~\"$job\"}",
-        "legendFormat": "{{job_id}}", "refId": "A"
-      }],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent", "min": 0, "max": 100,
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 15, "showPoints": "never", "spanNulls": true }
-        }, "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
-      "id": 5,
-      "type": "timeseries",
-      "title": "VRAM allocated",
-      "datasource": { "type": "prometheus", "uid": "stbc-prometheus" },
-      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 9 },
-      "targets": [{
-        "datasource": { "type": "prometheus", "uid": "stbc-prometheus" },
-        "expr": "stoomboot_job_vram_allocated_mb{user=\"__DEFAULT_USER__\", cluster=\"$cluster\", job_id=~\"$job\"}",
-        "legendFormat": "{{job_id}}", "refId": "A"
-      }],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "decmbytes", "min": 0,
-          "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": true }
-        }, "overrides": []
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
-    },
-    {
       "id": 6,
       "type": "timeseries",
       "title": "RAM usage",
       "datasource": { "type": "prometheus", "uid": "stbc-prometheus" },
-      "gridPos": { "x": 0, "y": 13, "w": 12, "h": 9 },
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 9 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "stbc-prometheus" },
@@ -213,7 +167,7 @@
       "type": "timeseries",
       "title": "CPU usage",
       "datasource": { "type": "prometheus", "uid": "stbc-prometheus" },
-      "gridPos": { "x": 12, "y": 13, "w": 12, "h": 9 },
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 9 },
       "targets": [{
         "datasource": { "type": "prometheus", "uid": "stbc-prometheus" },
         "expr": "stoomboot_job_cpu_efficiency{user=\"__DEFAULT_USER__\", cluster=\"$cluster\", job_id=~\"$job\"}",
@@ -235,7 +189,7 @@
       "id": 8,
       "type": "text",
       "title": "Job Log Output",
-      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 14 },
+      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 14 },
       "options": {
         "mode": "html",
         "content": "<div style=\"height:100%;display:flex;flex-direction:column;padding:4px;box-sizing:border-box;gap:6px;\">\n  <p style=\"color:#888;font-size:11px;margin:0;flex-shrink:0;\">Select a specific job from the dropdown above to view its log. Last 200 lines. <a href=\"http://localhost:9119/logs/${job}\" target=\"_blank\" style=\"color:#6ec0e8;\">Open in new tab</a></p>\n  <iframe src=\"http://localhost:9119/logs/${job}\" style=\"flex:1;border:1px solid #333;border-radius:3px;min-height:0;\" title=\"log ${job}\"></iframe>\n</div>",

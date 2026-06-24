@@ -181,6 +181,16 @@ job_memory_usage_mb = Gauge(
     "Actual memory used by the job (MB) — from MemoryUsage ClassAd (falls back to ImageSize/1024)",
     ["cluster", "user", "job_id", "resource_type", "node"],
 )
+
+# Track active job_memory_usage_mb labels per loop so we can clean up terminated
+# jobs without clearing the gauge and losing last-known-good values.
+_cluster_mem_labels: set[tuple[str, str, str, str, str]] = set()
+_personal_mem_labels: set[tuple[str, str, str, str, str]] = set()
+# Same idea for job_cpu_efficiency — the worker-node fallback (startd
+# ClassAds) is the only source for some jobs, and we don't want the personal
+# loop wiping its values every 15s.
+_personal_cpu_labels: set[tuple[str, str, str, str, str]] = set()
+
 job_cpu_efficiency = Gauge(
     "stoomboot_job_cpu_efficiency",
     "CPU efficiency ratio: TotalJobRunningCpuUsage / (duration_s × requested_cpus); 1.0 = fully utilising requested cores",
@@ -410,6 +420,41 @@ def safe_memory_mb(ad, key, default=0):
     return int(parsed) if parsed is not None else default
 
 
+def _compute_actual_memory_mb(job) -> float:
+    """Pick the most accurate actual-memory value from a schedd job ClassAd.
+
+    Priority: ResidentSetSize (KB → MB) → MemoryUsage (MB) → ImageSize (KB → MB).
+    Deliberately excludes MemoryProvisioned — that attribute is the cgroup LIMIT
+    (= RequestMemory), not actual usage. Falling through to it makes the RAM
+    panel read "max all the time" even when the job is using a fraction of it.
+    Returns 0.0 when no source has data.
+    """
+    rss_kb = safe_int(job, "ResidentSetSize", 0)
+    if rss_kb > 0:
+        return rss_kb / 1024.0
+    mem_usage_mb = safe_int(job, "MemoryUsage", 0)
+    if mem_usage_mb > 0:
+        return float(mem_usage_mb)
+    img_mb = safe_int(job, "ImageSize", 0) / 1024.0
+    if img_mb > 0:
+        return img_mb
+    return 0.0
+
+
+def _build_startd_job_constraint(nodes) -> str:
+    """ClassAd constraint for the Startd-fallback query: match any running job
+    (CPU or GPU) on the given nodes.
+
+    Previously this filter required `AssignedGPUs isnt undefined`, which silently
+    dropped every CPU job — those jobs then had no fallback when the schedd's
+    ResidentSetSize / MemoryUsage ClassAds were missing or stale.
+    """
+    node_cons = " || ".join(
+        f'Machine =?= "{node}.nikhef.nl"' for node in nodes
+    )
+    return f"(JobId isnt undefined) && ({node_cons})"
+
+
 # =============================================================================
 # Scrape
 # =============================================================================
@@ -423,7 +468,7 @@ def _clear_all():
         cluster_cpus_total, cluster_cpus_claimed,
         cluster_memory_total_mb, cluster_memory_claimed_mb,
         job_duration_seconds, job_gpus_requested, job_cpus_requested,
-        job_memory_requested_mb, job_memory_usage_mb, job_cpu_efficiency,
+        job_memory_requested_mb, job_cpu_efficiency,
         job_vram_allocated_mb,
         job_gpu_utilization_pct, job_gpu_memory_used_mb, job_gpu_memory_total_mb,
         job_cgroup_memory_rss_mb, job_cgroup_cpu_pct,
@@ -595,6 +640,7 @@ def scrape(collector_host: str, detail_user: str):
         n_gpu_jobs = 0
         n_cpu_jobs = 0
         _node_jobs: list = []  # jobs to scrape node_exporter for
+        seen_mem_labels: set[tuple[str, str, str, str, str]] = set()
 
         for schedd_ad in schedd_ads:
             try:
@@ -622,12 +668,19 @@ def scrape(collector_host: str, detail_user: str):
                 req_gpus = safe_int(job, "RequestGPUs", 0)
                 req_cpus = safe_int(job, "RequestCpus", 1)
                 req_mem_mb = safe_memory_mb(job, "RequestMemory", 0)
-                # Memory: ResidentSetSize (KB) → MemoryUsage (eval'd MB) → MemoryProvisioned → ImageSize/1024
                 rss_kb = safe_int(job, "ResidentSetSize", 0)
-                mem_usage_mb = safe_int(job, "MemoryUsage", 0)
-                prov_mb = float(safe_int(job, "MemoryProvisioned", 0))
-                img_mb = safe_int(job, "ImageSize", 0) / 1024.0
-                actual_mem_mb = (rss_kb / 1024.0) or mem_usage_mb or prov_mb or img_mb
+                sched_mem_usage_mb = safe_int(job, "MemoryUsage", 0)
+                # Only count "real" memory (RSS or MemoryUsage), not the
+                # ImageSize static fallback — the startd fallback is much more
+                # accurate than ImageSize and we don't want to clobber it.
+                sched_mem_mb = (rss_kb / 1024.0) if rss_kb > 0 else (
+                    float(sched_mem_usage_mb) if sched_mem_usage_mb > 0 else 0.0
+                )
+                total_cpu_secs = safe_float(job, "TotalJobRunningCpuUsage", 0)
+                user_cpu_secs = safe_float(job, "RemoteUserCpu", 0) + safe_float(job, "RemoteSysCpu", 0)
+                sched_cpu_secs = total_cpu_secs if total_cpu_secs > 0 else (
+                    user_cpu_secs if user_cpu_secs > 0 else 0.0
+                )
 
                 is_gpu = req_gpus >= 1
                 cluster = "gpu" if is_gpu else "cpu"
@@ -651,16 +704,18 @@ def scrape(collector_host: str, detail_user: str):
                     acc_running[key] += 1
                     acc_units[key] += units
                     acc_compute_secs[key] += duration * units
-                    if req_mem_mb > 0 and actual_mem_mb > 0:
-                        acc_mem_ratios[key].append(actual_mem_mb / req_mem_mb)
+                    if req_mem_mb > 0 and sched_mem_mb > 0:
+                        acc_mem_ratios[key].append(sched_mem_mb / req_mem_mb)
 
-                    # Queue this job for node_exporter scraping (detail_user GPU jobs)
-                    if is_gpu and owner == detail_user:
+                    # Queue detail_user jobs for the worker-node fallback (startd ClassAds).
+                    # GPU jobs first try node_exporter; CPU jobs skip that and go straight
+                    # to the startd fallback since CPU workers don't run node_exporter.
+                    if owner == detail_user:
+                        job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
                         raw_assigned = safe_get(job, "AssignedGPUs", "") or ""
                         gpu_uuid = raw_assigned.strip('" ').lower().removeprefix("gpu-")
                         _node_jobs.append(dict(
-                            job_id=f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}",
-                            node=node, gpu_uuid=gpu_uuid,
+                            job_id=job_id, node=node, gpu_uuid=gpu_uuid,
                             req_cpus=req_cpus, cluster=cluster, user=owner,
                         ))
 
@@ -669,16 +724,16 @@ def scrape(collector_host: str, detail_user: str):
                         job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
                         lbl = dict(cluster=cluster, user=owner, job_id=job_id,
                                    resource_type=rtype, node=node)
-                        cpu_secs_used = safe_float(job, "TotalJobRunningCpuUsage", 0) or (
-                            safe_float(job, "RemoteUserCpu", 0) + safe_float(job, "RemoteSysCpu", 0)
-                        )
-                        cpu_eff = cpu_secs_used / max(duration * max(req_cpus, 1), 1e-6)
+                        seen_mem_labels.add((cluster, owner, job_id, rtype, node))
                         job_duration_seconds.labels(**lbl).set(duration)
                         job_gpus_requested.labels(**lbl).set(req_gpus)
                         job_cpus_requested.labels(**lbl).set(req_cpus)
                         job_memory_requested_mb.labels(**lbl).set(req_mem_mb)
-                        job_memory_usage_mb.labels(**lbl).set(actual_mem_mb)
-                        job_cpu_efficiency.labels(**lbl).set(cpu_eff)
+                        if sched_mem_mb > 0:
+                            job_memory_usage_mb.labels(**lbl).set(sched_mem_mb)
+                        if sched_cpu_secs > 0:
+                            cpu_eff = sched_cpu_secs / max(duration * max(req_cpus, 1), 1e-6)
+                            job_cpu_efficiency.labels(**lbl).set(cpu_eff)
                         vram_per_gpu = vram_per_gpu_by_node.get(node, 0)
                         job_vram_allocated_mb.labels(**lbl).set(req_gpus * vram_per_gpu)
                         job_status_gauge.labels(cluster=cluster, user=owner, job_id=job_id).set(2)
@@ -702,6 +757,16 @@ def scrape(collector_host: str, detail_user: str):
                 user_memory_efficiency.labels(cluster=cluster, user=user).set(
                     sum(ratios) / len(ratios)
                 )
+
+        # Cleanup stale job_memory_usage_mb entries for terminated jobs
+        global _cluster_mem_labels
+        for tup in list(_cluster_mem_labels):
+            if tup not in seen_mem_labels:
+                try:
+                    job_memory_usage_mb.remove(*tup)
+                except (KeyError, ValueError):
+                    pass
+        _cluster_mem_labels = seen_mem_labels
 
         # _current_node_jobs is owned by scrape_personal(); cluster scrape ignores it
 
@@ -792,7 +857,12 @@ def _to_mib(raw: float) -> float:
 def _fetch_htcondor_gpu_metrics(nodes: list) -> dict:
     """Query HTCondor collector for GPU/CPU/memory metrics via Startd ClassAds.
     Returns {job_id: {util_pct, mem_used_mb, mem_total_mb, cpu_usage, memory_usage_mb}}.
-    Cached with 15s TTL to avoid hammering the collector."""
+    Cached with 15s TTL to avoid hammering the collector.
+
+    Matches both CPU and GPU jobs (anything with a JobId). The previous
+    `AssignedGPUs isnt undefined` filter silently dropped CPU jobs, leaving them
+    with no fallback when the schedd's RSS / MemoryUsage ClassAds were missing.
+    """
     global _htcondor_gpu_cache, _htcondor_gpu_cache_time
 
     now = time.time()
@@ -802,10 +872,7 @@ def _fetch_htcondor_gpu_metrics(nodes: list) -> dict:
     result = {}
     try:
         coll = htcondor.Collector(_collector_host)
-        node_cons = " || ".join(
-            f'Machine =?= "{node}.nikhef.nl"' for node in nodes
-        )
-        constraint = f"(AssignedGPUs isnt undefined) && ({node_cons})"
+        constraint = _build_startd_job_constraint(nodes)
 
         for ad in coll.query(htcondor.AdTypes.Startd, projection=[
             "Name", "Machine", "JobId",
@@ -836,10 +903,12 @@ def _fetch_htcondor_gpu_metrics(nodes: list) -> dict:
             if cpu_usage is not None:
                 entry["cpu_usage"] = float(cpu_usage)
 
-            # Memory: ResidentSetSize (KB) → MemoryUsage formula
-            rss_kb = ad.get("ResidentSetSize")
-            if rss_kb is not None:
-                entry["memory_usage_mb"] = int(rss_kb) / 1024.0
+            # Memory: ResidentSetSize (KB) → MemoryUsage (MB). Startd RSS is
+            # often 0/missing for CPU jobs (the lot cluster), so fall back to
+            # MemoryUsage — same chain as the schedd path uses.
+            mem_mb = _compute_actual_memory_mb(ad)
+            if mem_mb > 0:
+                entry["memory_usage_mb"] = mem_mb
 
             if entry:
                 result[job_id] = entry
@@ -853,10 +922,21 @@ def _fetch_htcondor_gpu_metrics(nodes: list) -> dict:
 
 def _scrape_worker_nodes(node_jobs: list, now: float) -> None:
     """Fetch GPU + cgroup metrics from node_exporter for each job in node_jobs.
-    Falls back to HTCondor Startd ClassAds for nodes without node_exporter."""
+    Falls back to HTCondor Startd ClassAds for nodes without node_exporter
+    (e.g. all CPU workers on the `lot` cluster, plus GPU workers where the
+    node_exporter HTTP port is unreachable from the login node)."""
     by_node: dict = {}
     for j in node_jobs:
         by_node.setdefault(j["node"], []).append(j)
+
+    # CPU workers don't run node_exporter — short-circuit them to the startd
+    # fallback so we don't waste a 5s timeout per CPU node.
+    cpu_only_nodes = {
+        node: jobs for node, jobs in by_node.items()
+        if all(j.get("cluster") == "cpu" for j in jobs)
+    }
+    for node, jobs in cpu_only_nodes.items():
+        by_node.pop(node, None)
 
     nodes_without_exporter: dict = {}
     for node, jobs in by_node.items():
@@ -910,31 +990,34 @@ def _scrape_worker_nodes(node_jobs: list, now: float) -> None:
                         )
                 _prev_cgroup_cpu[key] = (now, raw)
 
-    # Fallback: HTCondor Startd ClassAds for nodes without node_exporter
-    if nodes_without_exporter:
+    # Fallback: HTCondor Startd ClassAds for nodes without node_exporter, plus
+    # all CPU-only nodes (which we routed here above).
+    fallback_nodes = dict(nodes_without_exporter)
+    fallback_nodes.update(cpu_only_nodes)
+    if fallback_nodes:
         try:
-            htcondor_metrics = _fetch_htcondor_gpu_metrics(list(nodes_without_exporter.keys()))
+            htcondor_metrics = _fetch_htcondor_gpu_metrics(list(fallback_nodes.keys()))
         except Exception as exc:
             log.warning(f"HTCondor GPU metrics fallback failed: {exc}")
             return
 
-        for node, jobs in nodes_without_exporter.items():
+        for node, jobs in fallback_nodes.items():
             for j in jobs:
                 job_id = j["job_id"]
-                if job_id not in htcondor_metrics:
-                    continue
-                m = htcondor_metrics[job_id]
-                rtype = gpu_type_for_node(node)
+                m = htcondor_metrics.get(job_id, {})
+                rtype = "CPU" if j.get("cluster") == "cpu" else gpu_type_for_node(node)
                 lbl_gpu = dict(cluster=j["cluster"], user=j["user"],
                                job_id=job_id, node=node)
                 lbl_job = dict(cluster=j["cluster"], user=j["user"],
                                job_id=job_id, node=node, resource_type=rtype)
-                if m.get("util_pct") is not None:
-                    job_gpu_utilization_pct.labels(**lbl_gpu).set(m["util_pct"])
-                if m.get("mem_used_mb") is not None:
-                    job_gpu_memory_used_mb.labels(**lbl_gpu).set(m["mem_used_mb"])
-                if m.get("mem_total_mb") is not None:
-                    job_gpu_memory_total_mb.labels(**lbl_gpu).set(m["mem_total_mb"])
+
+                if rtype != "CPU":
+                    if m.get("util_pct") is not None:
+                        job_gpu_utilization_pct.labels(**lbl_gpu).set(m["util_pct"])
+                    if m.get("mem_used_mb") is not None:
+                        job_gpu_memory_used_mb.labels(**lbl_gpu).set(m["mem_used_mb"])
+                    if m.get("mem_total_mb") is not None:
+                        job_gpu_memory_total_mb.labels(**lbl_gpu).set(m["mem_total_mb"])
 
                 # CPU and memory from Startd ads (real usage, not schedd stale data)
                 if m.get("cpu_usage") is not None:
@@ -1044,8 +1127,12 @@ _PERSONAL_GAUGES = [
     user_jobs_running, user_jobs_queued, user_compute_seconds,
     user_units_in_use,
     job_duration_seconds, job_gpus_requested, job_cpus_requested,
-    job_memory_requested_mb, job_memory_usage_mb, job_cpu_efficiency,
+    job_memory_requested_mb,
     job_vram_allocated_mb, job_status_gauge,
+    # job_memory_usage_mb and job_cpu_efficiency are NOT cleared here — they're
+    # owned by the worker-node fallback (which runs every 3s) when the schedd
+    # has no real data, and we don't want to wipe the fallback's value with a
+    # zero from the schedd every 15s.
 ]
 
 
@@ -1070,6 +1157,8 @@ def scrape_personal(collector_host: str, detail_user: str) -> None:
         node_jobs: list = []
         acc_running: dict = defaultdict(int)
         acc_queued: dict = defaultdict(int)
+        seen_mem_labels: set[tuple[str, str, str, str, str]] = set()
+        seen_cpu_labels: set[tuple[str, str, str, str, str]] = set()
 
         for schedd_ad in schedd_ads:
             try:
@@ -1096,10 +1185,21 @@ def scrape_personal(collector_host: str, detail_user: str) -> None:
                 req_cpus = safe_int(job, "RequestCpus", 1)
                 req_mem_mb = safe_memory_mb(job, "RequestMemory", 0)
                 rss_kb = safe_int(job, "ResidentSetSize", 0)
-                mem_usage_mb = safe_int(job, "MemoryUsage", 0)
-                prov_mb = float(safe_int(job, "MemoryProvisioned", 0))
-                img_mb = safe_int(job, "ImageSize", 0) / 1024.0
-                actual_mem_mb = (rss_kb / 1024.0) or mem_usage_mb or prov_mb or img_mb
+                sched_mem_usage_mb = safe_int(job, "MemoryUsage", 0)
+                # Only count "real" memory (RSS or MemoryUsage), not the
+                # ImageSize static fallback — the startd fallback is much more
+                # accurate than ImageSize and we don't want to clobber it.
+                sched_mem_mb = (rss_kb / 1024.0) if rss_kb > 0 else (
+                    float(sched_mem_usage_mb) if sched_mem_usage_mb > 0 else 0.0
+                )
+                total_cpu_secs = safe_float(job, "TotalJobRunningCpuUsage", 0)
+                user_cpu_secs = safe_float(job, "RemoteUserCpu", 0) + safe_float(job, "RemoteSysCpu", 0)
+                # Only count real CPU usage — a 0 here usually means the startd
+                # hasn't reported to the schedd yet, so the startd ClassAd fallback
+                # has fresher data.
+                sched_cpu_secs = total_cpu_secs if total_cpu_secs > 0 else (
+                    user_cpu_secs if user_cpu_secs > 0 else 0.0
+                )
                 is_gpu = req_gpus >= 1
                 cluster = "gpu" if is_gpu else "cpu"
 
@@ -1115,30 +1215,56 @@ def scrape_personal(collector_host: str, detail_user: str) -> None:
                     job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
                     lbl = dict(cluster=cluster, user=detail_user,
                                job_id=job_id, resource_type=rtype, node=node)
-                    cpu_secs = safe_float(job, "TotalJobRunningCpuUsage", 0) or (
-                        safe_float(job, "RemoteUserCpu", 0) + safe_float(job, "RemoteSysCpu", 0)
-                    )
-                    cpu_eff = cpu_secs / max(duration * max(req_cpus, 1), 1e-6)
+                    lbl_tuple = (cluster, detail_user, job_id, rtype, node)
+                    seen_mem_labels.add(lbl_tuple)
                     vram_per_gpu = _vram_per_gpu_by_node.get(node, 0)
 
                     job_duration_seconds.labels(**lbl).set(duration)
                     job_gpus_requested.labels(**lbl).set(req_gpus)
                     job_cpus_requested.labels(**lbl).set(req_cpus)
                     job_memory_requested_mb.labels(**lbl).set(req_mem_mb)
-                    job_memory_usage_mb.labels(**lbl).set(actual_mem_mb)
-                    job_cpu_efficiency.labels(**lbl).set(cpu_eff)
+                    if sched_mem_mb > 0:
+                        job_memory_usage_mb.labels(**lbl).set(sched_mem_mb)
+                    if sched_cpu_secs > 0:
+                        cpu_eff = sched_cpu_secs / max(duration * max(req_cpus, 1), 1e-6)
+                        job_cpu_efficiency.labels(**lbl).set(cpu_eff)
+                        seen_cpu_labels.add(lbl_tuple)
                     job_vram_allocated_mb.labels(**lbl).set(req_gpus * vram_per_gpu)
+                    job_status_gauge.labels(cluster=cluster, user=detail_user, job_id=job_id).set(2)
 
-                    if is_gpu:
-                        raw = (safe_get(job, "AssignedGPUs", "") or "").strip('" ')
-                        gpu_uuid = raw.lower().removeprefix("gpu-")
-                        node_jobs.append(dict(
-                            job_id=job_id, node=node, gpu_uuid=gpu_uuid,
-                            req_cpus=req_cpus, cluster=cluster, user=detail_user,
-                        ))
+                    # Track for worker-node fallback (startd ClassAds) — works for
+                    # both GPU and CPU jobs so schedd-missing data gets filled in.
+                    raw = (safe_get(job, "AssignedGPUs", "") or "").strip('" ')
+                    gpu_uuid = raw.lower().removeprefix("gpu-")
+                    node_jobs.append(dict(
+                        job_id=job_id, node=node, gpu_uuid=gpu_uuid,
+                        req_cpus=req_cpus, cluster=cluster, user=detail_user,
+                    ))
 
                 elif status == 1:  # Queued
                     acc_queued[cluster] += 1
+                    job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
+                    job_status_gauge.labels(cluster=cluster, user=detail_user, job_id=job_id).set(1)
+
+        # Cleanup stale job_memory_usage_mb entries for finished jobs
+        global _personal_mem_labels
+        for tup in list(_personal_mem_labels):
+            if tup not in seen_mem_labels:
+                try:
+                    job_memory_usage_mb.remove(*tup)
+                except (KeyError, ValueError):
+                    pass
+        _personal_mem_labels = seen_mem_labels
+
+        # Same cleanup for job_cpu_efficiency
+        global _personal_cpu_labels
+        for tup in list(_personal_cpu_labels):
+            if tup not in seen_cpu_labels:
+                try:
+                    job_cpu_efficiency.remove(*tup)
+                except (KeyError, ValueError):
+                    pass
+        _personal_cpu_labels = seen_cpu_labels
 
         for cl in set(list(acc_running) + list(acc_queued)):
             user_jobs_running.labels(cluster=cl, user=detail_user).set(
