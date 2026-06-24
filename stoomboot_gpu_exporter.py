@@ -320,6 +320,19 @@ _htcondor_gpu_cache_time: float = 0
 _HTCONDOR_GPU_CACHE_TTL: float = 15  # seconds
 
 
+def _invalidate_htcondor_cache() -> None:
+    """Drop the cached startd-collector result so the next query re-fetches.
+
+    Called by scrape_personal when it sees a job the previous iteration
+    didn't have — otherwise the new job's memory metric is stuck on stale
+    data for up to _HTCONDOR_GPU_CACHE_TTL seconds (the user sees the
+    metric only after a 15s delay on every new run).
+    """
+    global _htcondor_gpu_cache, _htcondor_gpu_cache_time
+    _htcondor_gpu_cache = {}
+    _htcondor_gpu_cache_time = 0
+
+
 def node_short(machine_name: str) -> str:
     """slot1@wn-pijl-002.nikhef.nl -> wn-pijl-002"""
     name = (machine_name or "").split("@")[-1]
@@ -1254,6 +1267,11 @@ def scrape_personal(collector_host: str, detail_user: str) -> None:
                     job_memory_usage_mb.remove(*tup)
                 except (KeyError, ValueError):
                     pass
+        # Invalidate the startd-fallback cache when a brand-new job appears,
+        # so the next _scrape_worker_nodes tick re-queries the collector
+        # immediately instead of returning the previous run's stale result.
+        if seen_mem_labels - _personal_mem_labels:
+            _invalidate_htcondor_cache()
         _personal_mem_labels = seen_mem_labels
 
         # Same cleanup for job_cpu_efficiency
