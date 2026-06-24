@@ -962,6 +962,7 @@ class _LogHandler(http.server.BaseHTTPRequestHandler):
         total = len(lines)
         page = (
             "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<meta http-equiv='refresh' content='5'>"
             "<style>body{margin:0;padding:10px;background:#0d0d0d;color:#c8c8c8;"
             "font-family:'Courier New',Courier,monospace;font-size:12px;}"
             ".hdr{color:#555;font-size:10px;margin-bottom:6px;}"
@@ -970,6 +971,7 @@ class _LogHandler(http.server.BaseHTTPRequestHandler):
             f"<div class='hdr'>{_html_mod.escape(filename)}"
             f" — {total} lines total (last 200 shown)</div>"
             f"<pre>{_html_mod.escape(content)}</pre>"
+            "<script>window.scrollTo(0,document.body.scrollHeight)</script>"
             "</body></html>"
         )
         self._respond(200, "text/html; charset=utf-8", page.encode("utf-8"))
