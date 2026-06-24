@@ -790,8 +790,8 @@ def _to_mib(raw: float) -> float:
 
 
 def _fetch_htcondor_gpu_metrics(nodes: list) -> dict:
-    """Query HTCondor collector for GPU metrics via Startd ClassAds.
-    Returns {job_id: {util_pct, mem_used_mb, mem_total_mb}}.
+    """Query HTCondor collector for GPU/CPU/memory metrics via Startd ClassAds.
+    Returns {job_id: {util_pct, mem_used_mb, mem_total_mb, cpu_usage, memory_usage_mb}}.
     Cached with 15s TTL to avoid hammering the collector."""
     global _htcondor_gpu_cache, _htcondor_gpu_cache_time
 
@@ -811,20 +811,36 @@ def _fetch_htcondor_gpu_metrics(nodes: list) -> dict:
             "Name", "Machine", "JobId",
             "DeviceGPUsAverageUsage", "GPUsMemoryUsage",
             "GPUs_GlobalMemoryMb",
+            "CPUsUsage", "ResidentSetSize", "MemoryUsage",
+            "RequestCpus",
         ], constraint=constraint):
             job_id = ad.get("JobId")
             if not job_id:
                 continue
-            util = ad.get("DeviceGPUsAverageUsage")
-            mem_used = ad.get("GPUsMemoryUsage")
-            mem_total = ad.get("GPUs_GlobalMemoryMb")
             entry = {}
+
+            util = ad.get("DeviceGPUsAverageUsage")
             if util is not None:
                 entry["util_pct"] = float(util) * 100
+
+            mem_used = ad.get("GPUsMemoryUsage")
             if mem_used is not None:
                 entry["mem_used_mb"] = float(mem_used)
+
+            mem_total = ad.get("GPUs_GlobalMemoryMb")
             if mem_total is not None:
                 entry["mem_total_mb"] = float(mem_total)
+
+            # CPU: real-time usage from the startd (hotter than schedd data)
+            cpu_usage = ad.get("CPUsUsage")
+            if cpu_usage is not None:
+                entry["cpu_usage"] = float(cpu_usage)
+
+            # Memory: ResidentSetSize (KB) → MemoryUsage formula
+            rss_kb = ad.get("ResidentSetSize")
+            if rss_kb is not None:
+                entry["memory_usage_mb"] = int(rss_kb) / 1024.0
+
             if entry:
                 result[job_id] = entry
     except Exception as exc:
@@ -908,13 +924,25 @@ def _scrape_worker_nodes(node_jobs: list, now: float) -> None:
                 if job_id not in htcondor_metrics:
                     continue
                 m = htcondor_metrics[job_id]
-                lbl = dict(cluster=j["cluster"], user=j["user"], job_id=job_id, node=node)
+                rtype = gpu_type_for_node(node)
+                lbl_gpu = dict(cluster=j["cluster"], user=j["user"],
+                               job_id=job_id, node=node)
+                lbl_job = dict(cluster=j["cluster"], user=j["user"],
+                               job_id=job_id, node=node, resource_type=rtype)
                 if m.get("util_pct") is not None:
-                    job_gpu_utilization_pct.labels(**lbl).set(m["util_pct"])
+                    job_gpu_utilization_pct.labels(**lbl_gpu).set(m["util_pct"])
                 if m.get("mem_used_mb") is not None:
-                    job_gpu_memory_used_mb.labels(**lbl).set(m["mem_used_mb"])
+                    job_gpu_memory_used_mb.labels(**lbl_gpu).set(m["mem_used_mb"])
                 if m.get("mem_total_mb") is not None:
-                    job_gpu_memory_total_mb.labels(**lbl).set(m["mem_total_mb"])
+                    job_gpu_memory_total_mb.labels(**lbl_gpu).set(m["mem_total_mb"])
+
+                # CPU and memory from Startd ads (real usage, not schedd stale data)
+                if m.get("cpu_usage") is not None:
+                    req_cpus = j.get("req_cpus", 1)
+                    eff = float(m["cpu_usage"]) / max(req_cpus, 1)
+                    job_cpu_efficiency.labels(**lbl_job).set(eff)
+                if m.get("memory_usage_mb") is not None:
+                    job_memory_usage_mb.labels(**lbl_job).set(m["memory_usage_mb"])
 
 
 # =============================================================================
