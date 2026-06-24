@@ -35,9 +35,12 @@ if command -v condor_config_val &>/dev/null; then
 fi
 PORT_EXPORTER=9118
 PORT_PROMETHEUS=9090
+PORT_LOG=9119
 INTERVAL=15
 DEFAULT_USER="your_username"  # pinned as the default in the Grafana user dropdown,
                                # and the user whose CPU jobs get per-job detail
+JOB_LOG_DIR=""                 # directory with .out job log files; empty = no log server
+FULL_MODE=true                 # enable cluster-wide monitoring
 
 PROM_SIF="${REPO_DIR}/prometheus.sif"
 PROM_DATA="${REPO_DIR}/prom_data"
@@ -69,9 +72,12 @@ while [[ $# -gt 0 ]]; do
         --collector)        COLLECTOR="$2"; shift 2 ;;
         --port-exporter)    PORT_EXPORTER="$2"; shift 2 ;;
         --port-prometheus)  PORT_PROMETHEUS="$2"; shift 2 ;;
+        --log-port)         PORT_LOG="$2"; shift 2 ;;
         --interval)         INTERVAL="$2"; shift 2 ;;
         --python)           PYTHON_BIN="$2"; shift 2 ;;
         --default-user)     DEFAULT_USER="$2"; shift 2 ;;
+        --log-dir)          JOB_LOG_DIR="$2"; shift 2 ;;
+        --full)             FULL_MODE=true; shift ;;
         *) error "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -95,21 +101,40 @@ resolve_htcondor_module() {
     return 1
 }
 
+kill_by_port() {
+    local port="$1"
+    local pids
+    pids=$(fuser "${port}/tcp" 2>/dev/null) || return 0
+    for p in $pids; do
+        kill "$p" 2>/dev/null || true
+    done
+}
+
 stop_process() {
-    local name="$1" pidfile="$2"
+    local name="$1" pidfile="$2" port="${3:-}"
     if is_running "$pidfile"; then
         kill "$(cat "$pidfile")" 2>/dev/null && info "Stopped $name (pid $(cat "$pidfile"))"
         rm -f "$pidfile"
     else
-        info "$name is not running"
+        info "$name not running via pid file"
     fi
+    # Always sweep the port — catches orphaned processes the pid file missed
+    if [[ -n "$port" ]]; then
+        local pids
+        pids=$(fuser "${port}/tcp" 2>/dev/null) || true
+        if [[ -n "$pids" ]]; then
+            warn "Port ${port} still occupied (${pids}) — killing..."
+            kill_by_port "$port"
+        fi
+    fi
+    rm -f "$pidfile"
 }
 
 # ── --stop ────────────────────────────────────────────────────────────────────
 if [[ "$ACTION" == "stop" ]]; then
     section "Stopping all processes"
-    stop_process "exporter"    "$EXPORTER_PID"
-    stop_process "prometheus"  "$PROMETHEUS_PID"
+    stop_process "exporter"    "$EXPORTER_PID"  "$PORT_EXPORTER"
+    stop_process "prometheus"  "$PROMETHEUS_PID" "$PORT_PROMETHEUS"
     info "Done."
     exit 0
 fi
@@ -251,6 +276,50 @@ fi
 # ── Step 3: Start / restart processes ─────────────────────────────────────────
 section "Step 3: Starting services"
 
+# Find the lowest free TCP port >= the given starting point
+port_in_use() {
+    # ss built-in sport filter is reliable regardless of output column layout
+    ss -Htln "sport = :$1" 2>/dev/null | grep -q .
+}
+
+find_free_port() {
+    local port="$1"
+    while port_in_use "$port"; do
+        warn "Port ${port} in use — trying $((port + 1))..." >&2
+        port=$((port + 1))
+    done
+    echo "$port"
+}
+
+# Resolve actual ports: reuse saved port if service is already running,
+# otherwise scan upward from the requested port to find a free one.
+if is_running "$EXPORTER_PID" && [[ -f "${PID_DIR}/exporter.port" ]]; then
+    PORT_EXPORTER=$(cat "${PID_DIR}/exporter.port")
+    info "Exporter already running on port ${PORT_EXPORTER}"
+elif ! $FORCE_RESTART && is_running "$EXPORTER_PID"; then
+    : # keep PORT_EXPORTER as-is
+else
+    PORT_EXPORTER=$(find_free_port "$PORT_EXPORTER")
+    mkdir -p "$PID_DIR"
+    echo "$PORT_EXPORTER" > "${PID_DIR}/exporter.port"
+fi
+
+if is_running "$PROMETHEUS_PID" && [[ -f "${PID_DIR}/prometheus.port" ]]; then
+    PORT_PROMETHEUS=$(cat "${PID_DIR}/prometheus.port")
+    info "Prometheus already running on port ${PORT_PROMETHEUS}"
+elif ! $FORCE_RESTART && is_running "$PROMETHEUS_PID"; then
+    : # keep PORT_PROMETHEUS as-is
+else
+    PORT_PROMETHEUS=$(find_free_port "$PORT_PROMETHEUS")
+    mkdir -p "$PID_DIR"
+    echo "$PORT_PROMETHEUS" > "${PID_DIR}/prometheus.port"
+fi
+
+# If a log server is configured, nuke any stale process on that port first
+if [[ -n "$JOB_LOG_DIR" ]]; then
+    kill_by_port "$PORT_LOG" || true
+fi
+
 # Helper: ensure a process is running. By default skips if already up;
 # with FORCE_RESTART=true it kills and relaunches.
 # stdin is detached (< /dev/null) so this survives an ssh session closing.
@@ -274,12 +343,18 @@ launch() {
 }
 
 # 4a. Exporter
+_exporter_args=(
+    --collector "${COLLECTOR}"
+    --port "${PORT_EXPORTER}"
+    --interval "${INTERVAL}"
+    --detail-user "${DEFAULT_USER}"
+)
+[[ -n "$JOB_LOG_DIR" ]] && _exporter_args+=(--log-dir "${JOB_LOG_DIR}" --log-port "${PORT_LOG}")
+$FULL_MODE && _exporter_args+=(--full)
+
 launch "exporter" "$EXPORTER_PID" "$EXPORTER_LOG" \
     "${PYTHON_BIN}" "${REPO_DIR}/stoomboot_gpu_exporter.py" \
-        --collector "${COLLECTOR}" \
-        --port "${PORT_EXPORTER}" \
-        --interval "${INTERVAL}" \
-        --detail-user "${DEFAULT_USER}"
+        "${_exporter_args[@]}"
 
 sleep 2  # let it bind before prometheus tries to scrape
 

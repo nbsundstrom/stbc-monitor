@@ -29,10 +29,16 @@ are available. If not pip-installable, they're usually on the system already
 """
 
 import argparse
+import html as _html_mod
+import http.server
 import logging
+import os
 import re
+import threading
 import time
+import urllib.request
 from collections import defaultdict
+from typing import Optional
 
 try:
     import htcondor2 as htcondor
@@ -180,6 +186,43 @@ job_cpu_efficiency = Gauge(
     "CPU efficiency ratio: TotalJobRunningCpuUsage / (duration_s × requested_cpus); 1.0 = fully utilising requested cores",
     ["cluster", "user", "job_id", "resource_type", "node"],
 )
+job_vram_allocated_mb = Gauge(
+    "stoomboot_job_vram_allocated_mb",
+    "VRAM allocated to this job (MB): RequestGPUs × GPUs_GlobalMemoryMb on the assigned node",
+    ["cluster", "user", "job_id", "resource_type", "node"],
+)
+
+# ── Worker-node metrics (scraped from node_exporter on the worker) ────────────
+job_gpu_utilization_pct = Gauge(
+    "stoomboot_job_gpu_utilization_pct",
+    "GPU compute utilization % (0–100) from node_exporter on the worker node",
+    ["cluster", "user", "job_id", "node"],
+)
+job_gpu_memory_used_mb = Gauge(
+    "stoomboot_job_gpu_memory_used_mb",
+    "GPU memory in use (MiB) for the job's assigned GPU",
+    ["cluster", "user", "job_id", "node"],
+)
+job_gpu_memory_total_mb = Gauge(
+    "stoomboot_job_gpu_memory_total_mb",
+    "Total GPU memory (MiB) for the job's assigned GPU",
+    ["cluster", "user", "job_id", "node"],
+)
+job_cgroup_memory_rss_mb = Gauge(
+    "stoomboot_job_cgroup_memory_rss_mb",
+    "RSS memory used (MiB) from cgroup — more accurate than HTCondor MemoryUsage",
+    ["cluster", "user", "job_id", "node"],
+)
+job_cgroup_cpu_pct = Gauge(
+    "stoomboot_job_cgroup_cpu_pct",
+    "CPU usage % derived from cgroup cpu_seconds rate (100 = 1 core fully used)",
+    ["cluster", "user", "job_id", "node"],
+)
+job_status_gauge = Gauge(
+    "stoomboot_job_status",
+    "HTCondor job status (1=idle/queued, 2=running) — emitted for all tracked jobs so idle jobs appear in dropdowns",
+    ["cluster", "user", "job_id"],
+)
 
 # ── Exporter health (for the 'targets online' / freshness tiles) ─────────────
 exporter_up = Gauge(
@@ -217,6 +260,54 @@ GPU_NODE_MAP = {
     "wn-pijl-006": "NVIDIA_L40S",
     "wn-pijl-007": "NVIDIA_L40S",
 }
+
+
+# ── Worker-node scraping config ───────────────────────────────────────────────
+_node_exporter_port: int = 9100
+
+# Candidate metric names in priority order (first match wins)
+_GPU_UTIL_NAMES = [
+    "nvidia_gpu_duty_cycle",       # nvidia-prometheus / node_exporter
+    "DCGM_FI_DEV_GPU_UTIL",       # dcgm-exporter (0–100)
+    "gpu_utilization_percent",
+    "gpu_usage_percent",
+]
+_GPU_MEM_USED_NAMES = [
+    "nvidia_gpu_memory_used_bytes",   # bytes
+    "DCGM_FI_DEV_FB_USED",           # MiB
+    "gpu_memory_used_bytes",
+]
+_GPU_MEM_TOTAL_NAMES = [
+    "nvidia_gpu_memory_total_bytes",  # bytes
+    "DCGM_FI_DEV_FB_TOTAL",          # MiB
+    "gpu_memory_total_bytes",
+]
+_CGROUP_RSS_NAMES = [
+    "cgroup_memory_rss_bytes",        # Nikhef custom exporter (bytes)
+    "cgroup_memory_used_bytes",
+    "container_memory_rss",           # cadvisor (bytes)
+]
+_CGROUP_CPU_NAMES = [
+    "cgroup_cpu_usage_seconds_total",     # Nikhef custom (seconds or nanoseconds)
+    "container_cpu_usage_seconds_total",  # cadvisor (nanoseconds)
+]
+
+# Rate-tracking for cgroup CPU: {(job_id, node): (timestamp, counter_value)}
+_prev_cgroup_cpu: dict = {}
+
+# Shared state: jobs to poll, updated by the personal HTCondor loop
+_current_node_jobs: list = []
+
+# VRAM cache: node → MiB per GPU, updated by the cluster loop
+_vram_per_gpu_by_node: dict = {}
+
+# HTCondor collector host (set from --collector in main())
+_collector_host: str = "stbc-019.nikhef.nl"
+
+# HTCondor GPU metrics cache (avoids querying collector every loop iteration)
+_htcondor_gpu_cache: dict = {}   # {job_id: {util_pct, mem_used_mb, mem_total_mb}}
+_htcondor_gpu_cache_time: float = 0
+_HTCONDOR_GPU_CACHE_TTL: float = 15  # seconds
 
 
 def node_short(machine_name: str) -> str:
@@ -319,6 +410,9 @@ def _clear_all():
         cluster_memory_total_mb, cluster_memory_claimed_mb,
         job_duration_seconds, job_gpus_requested, job_cpus_requested,
         job_memory_requested_mb, job_memory_usage_mb, job_cpu_efficiency,
+        job_vram_allocated_mb,
+        job_gpu_utilization_pct, job_gpu_memory_used_mb, job_gpu_memory_total_mb,
+        job_cgroup_memory_rss_mb, job_cgroup_cpu_pct,
     ):
         g.clear()
 
@@ -341,7 +435,7 @@ def scrape(collector_host: str, detail_user: str):
                 "Name", "State", "Activity", "RemoteUser",
                 "Cpus", "TotalCpus",
                 "Memory", "TotalMemory",
-                "GPUs", "GPUs_DeviceName", "TotalGPUs",
+                "GPUs", "GPUs_DeviceName", "GPUs_GlobalMemoryMb", "TotalGPUs",
                 "SlotType",
             ],
         )
@@ -355,6 +449,7 @@ def scrape(collector_host: str, detail_user: str):
         gpu_cpu_claimed = 0
         gpu_mem_total_by_node: dict[str, int] = {}
         gpu_mem_claimed = 0
+        vram_per_gpu_by_node: dict[str, int] = {}
         # cpu accounting: dedupe machine totals so partitionable slots don't
         # multiply TotalCpus; claimed cores summed from Claimed slots.
         cpu_total_by_machine = {}        # node -> TotalCpus (machine cores)
@@ -391,6 +486,10 @@ def scrape(collector_host: str, detail_user: str):
                     gpu_cpu_total_by_node[node] = max(gpu_cpu_total_by_node.get(node, 0), total_cpus)
                 if total_mem_mb > 0:
                     gpu_mem_total_by_node[node] = max(gpu_mem_total_by_node.get(node, 0), total_mem_mb)
+                vram = safe_int(ad, "GPUs_GlobalMemoryMb", 0)
+                if vram > 0:
+                    vram_per_gpu_by_node[node] = max(vram_per_gpu_by_node.get(node, 0), vram)
+
                 # Only count actually-assigned GPUs in claimed slots.
                 if state == "Claimed" and n_gpus >= 1:
                     user = safe_get(ad, "RemoteUser", "unknown").split("@")[0]
@@ -418,6 +517,10 @@ def scrape(collector_host: str, detail_user: str):
                     slots_claimed_by_user.labels(
                         cluster="cpu", user=user, resource_type="CPU", node=node
                     ).inc(claimed_cores)
+
+        # Share VRAM cache with personal scrape
+        global _vram_per_gpu_by_node
+        _vram_per_gpu_by_node = dict(vram_per_gpu_by_node)
 
         # Collapse per-node totals into per-rtype totals
         gpu_total: dict[str, int] = defaultdict(int)
@@ -477,6 +580,7 @@ def scrape(collector_host: str, detail_user: str):
 
         n_gpu_jobs = 0
         n_cpu_jobs = 0
+        _node_jobs: list = []  # jobs to scrape node_exporter for
 
         for schedd_ad in schedd_ads:
             try:
@@ -485,10 +589,13 @@ def scrape(collector_host: str, detail_user: str):
                     projection=[
                         "ClusterId", "ProcId", "Owner", "JobStatus",
                         "RequestGPUs", "RequestCpus", "RequestMemory",
-                        "MemoryUsage", "ImageSize",
+                        "MemoryUsage", "ImageSize", "ResidentSetSize",
+                        "MemoryProvisioned",
                         "TotalJobRunningCpuUsage",
+                        "RemoteUserCpu", "RemoteSysCpu",
                         "QDate", "JobStartDate",
                         "RemoteHost", "LastRemoteHost",
+                        "AssignedGPUs",
                     ],
                 )
             except Exception as e:
@@ -501,8 +608,12 @@ def scrape(collector_host: str, detail_user: str):
                 req_gpus = safe_int(job, "RequestGPUs", 0)
                 req_cpus = safe_int(job, "RequestCpus", 1)
                 req_mem_mb = safe_memory_mb(job, "RequestMemory", 0)
-                # MemoryUsage is directly in MB (HTCondor 8.8+); fall back to ImageSize (KB)/1024
-                actual_mem_mb = float(safe_int(job, "MemoryUsage", 0)) or (safe_int(job, "ImageSize", 0) / 1024.0)
+                # Memory: ResidentSetSize (KB) → MemoryUsage (eval'd MB) → MemoryProvisioned → ImageSize/1024
+                rss_kb = safe_int(job, "ResidentSetSize", 0)
+                mem_usage_mb = safe_int(job, "MemoryUsage", 0)
+                prov_mb = float(safe_int(job, "MemoryProvisioned", 0))
+                img_mb = safe_int(job, "ImageSize", 0) / 1024.0
+                actual_mem_mb = (rss_kb / 1024.0) or mem_usage_mb or prov_mb or img_mb
 
                 is_gpu = req_gpus >= 1
                 cluster = "gpu" if is_gpu else "cpu"
@@ -529,12 +640,24 @@ def scrape(collector_host: str, detail_user: str):
                     if req_mem_mb > 0 and actual_mem_mb > 0:
                         acc_mem_ratios[key].append(actual_mem_mb / req_mem_mb)
 
+                    # Queue this job for node_exporter scraping (detail_user GPU jobs)
+                    if is_gpu and owner == detail_user:
+                        raw_assigned = safe_get(job, "AssignedGPUs", "") or ""
+                        gpu_uuid = raw_assigned.strip('" ').lower().removeprefix("gpu-")
+                        _node_jobs.append(dict(
+                            job_id=f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}",
+                            node=node, gpu_uuid=gpu_uuid,
+                            req_cpus=req_cpus, cluster=cluster, user=owner,
+                        ))
+
                     # Per-job detail: GPU = everyone; CPU = detail_user only
                     if is_gpu or owner == detail_user:
                         job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
                         lbl = dict(cluster=cluster, user=owner, job_id=job_id,
                                    resource_type=rtype, node=node)
-                        cpu_secs_used = safe_int(job, "TotalJobRunningCpuUsage", 0)
+                        cpu_secs_used = safe_int(job, "TotalJobRunningCpuUsage", 0) or (
+                            safe_int(job, "RemoteUserCpu", 0) + safe_int(job, "RemoteSysCpu", 0)
+                        )
                         cpu_eff = cpu_secs_used / max(duration * max(req_cpus, 1), 1e-6)
                         job_duration_seconds.labels(**lbl).set(duration)
                         job_gpus_requested.labels(**lbl).set(req_gpus)
@@ -542,9 +665,15 @@ def scrape(collector_host: str, detail_user: str):
                         job_memory_requested_mb.labels(**lbl).set(req_mem_mb)
                         job_memory_usage_mb.labels(**lbl).set(actual_mem_mb)
                         job_cpu_efficiency.labels(**lbl).set(cpu_eff)
+                        vram_per_gpu = vram_per_gpu_by_node.get(node, 0)
+                        job_vram_allocated_mb.labels(**lbl).set(req_gpus * vram_per_gpu)
+                        job_status_gauge.labels(cluster=cluster, user=owner, job_id=job_id).set(2)
 
                 elif status == 1:  # Idle / queued
                     acc_queued[key] += 1
+                    if is_gpu or owner == detail_user:
+                        job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
+                        job_status_gauge.labels(cluster=cluster, user=owner, job_id=job_id).set(1)
 
         # Publish per-user aggregates
         all_keys = set(acc_running) | set(acc_queued)
@@ -559,6 +688,8 @@ def scrape(collector_host: str, detail_user: str):
                 user_memory_efficiency.labels(cluster=cluster, user=user).set(
                     sum(ratios) / len(ratios)
                 )
+
+        # _current_node_jobs is owned by scrape_personal(); cluster scrape ignores it
 
         dt = time.time() - t0
         last_scrape_success.set(1)
@@ -578,6 +709,425 @@ def scrape(collector_host: str, detail_user: str):
 
 
 # =============================================================================
+# Worker-node metric scraping helpers
+# =============================================================================
+
+def _parse_prom_text(text: str) -> dict:
+    """Minimal Prometheus text-format parser. Returns {name: [(label_dict, value), ...]}."""
+    result: dict = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([^\s]+)", line)
+        if not m:
+            continue
+        name, labels_raw, val_str = m.group(1), m.group(2) or "", m.group(3)
+        try:
+            value = float(val_str)
+        except ValueError:
+            continue
+        labels = {lm.group(1): lm.group(2)
+                  for lm in re.finditer(r'([a-zA-Z_]\w*)="([^"]*)"', labels_raw)}
+        result.setdefault(name, []).append((labels, value))
+    return result
+
+
+def _fetch_node_metrics(host: str, port: int) -> dict:
+    try:
+        url = f"http://{host}:{port}/metrics"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return _parse_prom_text(resp.read().decode("utf-8", errors="replace"))
+    except Exception as exc:
+        log.debug(f"node_exporter {host}:{port} unreachable: {exc}")
+        return {}
+
+
+def _pick_gpu(parsed: dict, candidates: list, gpu_uuid: str) -> Optional[float]:
+    """Return the first matching metric value, preferring entries whose labels
+    contain `gpu_uuid`. Falls back to the first entry if uuid is unknown."""
+    norm_uuid = gpu_uuid.lower().removeprefix("gpu-")
+    for name in candidates:
+        if name not in parsed:
+            continue
+        entries = parsed[name]
+        if norm_uuid:
+            matched = [v for lbl, v in entries if norm_uuid in str(lbl).lower()]
+            if matched:
+                return matched[0]
+        if entries:
+            return entries[0][1]
+    return None
+
+
+def _pick_cgroup(parsed: dict, candidates: list, username: str) -> Optional[float]:
+    """Return metric value for the given username from cgroup metrics."""
+    for name in candidates:
+        if name not in parsed:
+            continue
+        for lbl, val in parsed[name]:
+            if lbl.get("username") == username:
+                return val
+    return None
+
+
+def _to_mib(raw: float) -> float:
+    """Convert bytes → MiB if value looks like bytes (> 1 million)."""
+    return raw / (1024 * 1024) if raw > 1_000_000 else raw
+
+
+def _fetch_htcondor_gpu_metrics(nodes: list) -> dict:
+    """Query HTCondor collector for GPU metrics via Startd ClassAds.
+    Returns {job_id: {util_pct, mem_used_mb, mem_total_mb}}.
+    Cached with 15s TTL to avoid hammering the collector."""
+    global _htcondor_gpu_cache, _htcondor_gpu_cache_time
+
+    now = time.time()
+    if now - _htcondor_gpu_cache_time < _HTCONDOR_GPU_CACHE_TTL:
+        return _htcondor_gpu_cache
+
+    result = {}
+    try:
+        coll = htcondor.Collector(_collector_host)
+        node_cons = " || ".join(
+            f'Machine =?= "{node}.nikhef.nl"' for node in nodes
+        )
+        constraint = f"(AssignedGPUs isnt undefined) && ({node_cons})"
+
+        for ad in coll.query(htcondor.AdTypes.Startd, projection=[
+            "Name", "Machine", "JobId",
+            "DeviceGPUsAverageUsage", "GPUsMemoryUsage",
+            "GPUs_GlobalMemoryMb",
+        ], constraint=constraint):
+            job_id = ad.get("JobId")
+            if not job_id:
+                continue
+            util = ad.get("DeviceGPUsAverageUsage")
+            mem_used = ad.get("GPUsMemoryUsage")
+            mem_total = ad.get("GPUs_GlobalMemoryMb")
+            entry = {}
+            if util is not None:
+                entry["util_pct"] = float(util) * 100
+            if mem_used is not None:
+                entry["mem_used_mb"] = float(mem_used)
+            if mem_total is not None:
+                entry["mem_total_mb"] = float(mem_total)
+            if entry:
+                result[job_id] = entry
+    except Exception as exc:
+        log.warning(f"HTCondor GPU metrics query failed: {exc}")
+
+    _htcondor_gpu_cache = result
+    _htcondor_gpu_cache_time = now
+    return result
+
+
+def _scrape_worker_nodes(node_jobs: list, now: float) -> None:
+    """Fetch GPU + cgroup metrics from node_exporter for each job in node_jobs.
+    Falls back to HTCondor Startd ClassAds for nodes without node_exporter."""
+    by_node: dict = {}
+    for j in node_jobs:
+        by_node.setdefault(j["node"], []).append(j)
+
+    nodes_without_exporter: dict = {}
+    for node, jobs in by_node.items():
+        if node == "unknown":
+            continue
+        parsed = _fetch_node_metrics(node, _node_exporter_port)
+        if not parsed:
+            nodes_without_exporter[node] = jobs
+            continue
+
+        for j in jobs:
+            job_id, cluster, user = j["job_id"], j["cluster"], j["user"]
+            gpu_uuid, req_cpus = j["gpu_uuid"], j["req_cpus"]
+            lbl = dict(cluster=cluster, user=user, job_id=job_id, node=node)
+
+            # GPU utilization (%)
+            raw = _pick_gpu(parsed, _GPU_UTIL_NAMES, gpu_uuid)
+            if raw is not None:
+                pct = raw if raw > 1.0 else raw * 100.0
+                job_gpu_utilization_pct.labels(**lbl).set(pct)
+
+            # GPU memory used (MiB)
+            raw = _pick_gpu(parsed, _GPU_MEM_USED_NAMES, gpu_uuid)
+            if raw is not None:
+                job_gpu_memory_used_mb.labels(**lbl).set(_to_mib(raw))
+
+            # GPU memory total (MiB)
+            raw = _pick_gpu(parsed, _GPU_MEM_TOTAL_NAMES, gpu_uuid)
+            if raw is not None:
+                job_gpu_memory_total_mb.labels(**lbl).set(_to_mib(raw))
+
+            # Cgroup RSS memory (MiB)
+            raw = _pick_cgroup(parsed, _CGROUP_RSS_NAMES, user)
+            if raw is not None:
+                job_cgroup_memory_rss_mb.labels(**lbl).set(_to_mib(raw))
+
+            # Cgroup CPU % (rate of cpu_seconds counter)
+            raw = _pick_cgroup(parsed, _CGROUP_CPU_NAMES, user)
+            if raw is not None:
+                key = (job_id, node)
+                if key in _prev_cgroup_cpu:
+                    prev_ts, prev_val = _prev_cgroup_cpu[key]
+                    dt = now - prev_ts
+                    if dt > 0:
+                        delta = raw - prev_val
+                        if delta / dt > 1e8:
+                            delta /= 1e9
+                        cpu_cores = delta / dt
+                        job_cgroup_cpu_pct.labels(**lbl).set(
+                            cpu_cores * 100.0 / max(req_cpus, 1)
+                        )
+                _prev_cgroup_cpu[key] = (now, raw)
+
+    # Fallback: HTCondor Startd ClassAds for nodes without node_exporter
+    if nodes_without_exporter:
+        try:
+            htcondor_metrics = _fetch_htcondor_gpu_metrics(list(nodes_without_exporter.keys()))
+        except Exception as exc:
+            log.warning(f"HTCondor GPU metrics fallback failed: {exc}")
+            return
+
+        for node, jobs in nodes_without_exporter.items():
+            for j in jobs:
+                job_id = j["job_id"]
+                if job_id not in htcondor_metrics:
+                    continue
+                m = htcondor_metrics[job_id]
+                lbl = dict(cluster=j["cluster"], user=j["user"], job_id=job_id, node=node)
+                if m.get("util_pct") is not None:
+                    job_gpu_utilization_pct.labels(**lbl).set(m["util_pct"])
+                if m.get("mem_used_mb") is not None:
+                    job_gpu_memory_used_mb.labels(**lbl).set(m["mem_used_mb"])
+                if m.get("mem_total_mb") is not None:
+                    job_gpu_memory_total_mb.labels(**lbl).set(m["mem_total_mb"])
+
+
+# =============================================================================
+# Log file HTTP server  (optional — only started when --log-dir is given)
+# Serves the last 200 lines of <log_dir>/<job_id>.out at /logs/<job_id>.
+# =============================================================================
+
+_log_dir: str = ""
+
+
+class _LogHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path.startswith("/logs/"):
+            job_id = path[6:]
+            if job_id and job_id not in (".*", ""):
+                self._serve_job(job_id)
+                return
+        self._serve_index()
+
+    def _serve_job(self, job_id: str):
+        # Try: <job_id>.out → <cluster_id>.out → <cluster_id>_<proc_id>.out
+        candidates = [f"{job_id}.out"]
+        if "." in job_id:
+            candidates.append(f"{job_id.split('.')[0]}.out")
+            candidates.append(f"{job_id.replace('.', '_')}.out")
+        for name in candidates:
+            p = os.path.join(_log_dir, name)
+            if os.path.isfile(p):
+                self._send_log(p, name)
+                return
+        msg = f"No log found for job {job_id}\n\nTried:\n" + "\n".join(
+            f"  {os.path.join(_log_dir, c)}" for c in candidates
+        )
+        self._respond(404, "text/plain", msg.encode())
+
+    def _send_log(self, path: str, filename: str):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError as e:
+            self._respond(500, "text/plain", str(e).encode())
+            return
+        content = "".join(lines[-200:])
+        total = len(lines)
+        page = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<style>body{margin:0;padding:10px;background:#0d0d0d;color:#c8c8c8;"
+            "font-family:'Courier New',Courier,monospace;font-size:12px;}"
+            ".hdr{color:#555;font-size:10px;margin-bottom:6px;}"
+            "pre{margin:0;white-space:pre-wrap;word-break:break-all;}</style>"
+            "</head><body>"
+            f"<div class='hdr'>{_html_mod.escape(filename)}"
+            f" — {total} lines total (last 200 shown)</div>"
+            f"<pre>{_html_mod.escape(content)}</pre>"
+            "</body></html>"
+        )
+        self._respond(200, "text/html; charset=utf-8", page.encode("utf-8"))
+
+    def _serve_index(self):
+        try:
+            names = sorted(f for f in os.listdir(_log_dir) if f.endswith(".out"))
+        except OSError:
+            names = []
+        items = "".join(f'<li><a href="/logs/{n[:-4]}">{n}</a></li>' for n in names)
+        page = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<style>body{margin:0;padding:12px;background:#0d0d0d;color:#c8c8c8;"
+            "font-family:sans-serif;font-size:13px;}a{color:#6ec0e8;}p{color:#888;}</style>"
+            "</head><body>"
+            "<p>Select a specific job in the Grafana dropdown to view its log.</p>"
+            f"<p>Log directory: <code>{_html_mod.escape(_log_dir)}</code></p>"
+            f"<ul>{items or '<li><em>No .out files found</em></li>'}</ul>"
+            "</body></html>"
+        )
+        self._respond(200, "text/html; charset=utf-8", page.encode("utf-8"))
+
+    def _respond(self, code: int, content_type: str, body: bytes):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass  # suppress access logs
+
+
+def _start_log_server(port: int):
+    srv = http.server.ThreadingHTTPServer(("", port), _LogHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True, name="log-server").start()
+    log.info(f"Log server on :{port} — serving {_log_dir!r}")
+
+
+def scrape_personal(collector_host: str, detail_user: str) -> None:
+    """Fast scrape: only the detail user's own running jobs.
+    Updates per-job metrics and _current_node_jobs for the node_exporter loop.
+    Does NOT clear cluster-wide metrics — those are owned by scrape().
+    """
+    t0 = time.time()
+    now = t0
+    try:
+        coll = htcondor.Collector(collector_host)
+        schedd_ads = coll.query(
+            htcondor.AdTypes.Schedd,
+            projection=["Name", "MyAddress", "CondorVersion"],
+        )
+
+        node_jobs: list = []
+        acc_running: dict = defaultdict(int)
+        acc_queued: dict = defaultdict(int)
+
+        for schedd_ad in schedd_ads:
+            try:
+                schedd = htcondor.Schedd(schedd_ad)
+                jobs = schedd.query(
+                    constraint=f'Owner == "{detail_user}"',
+                    projection=[
+                        "ClusterId", "ProcId", "JobStatus",
+                        "RequestGPUs", "RequestCpus", "RequestMemory",
+                        "MemoryUsage", "ImageSize", "ResidentSetSize",
+                        "MemoryProvisioned",
+                        "TotalJobRunningCpuUsage",
+                        "RemoteUserCpu", "RemoteSysCpu",
+                        "JobStartDate", "RemoteHost", "LastRemoteHost", "AssignedGPUs",
+                    ],
+                )
+            except Exception as exc:
+                log.warning(f"Personal scrape schedd {safe_get(schedd_ad, 'Name', '?')}: {exc}")
+                continue
+
+            for job in jobs:
+                status = safe_int(job, "JobStatus", 0)
+                req_gpus = safe_int(job, "RequestGPUs", 0)
+                req_cpus = safe_int(job, "RequestCpus", 1)
+                req_mem_mb = safe_memory_mb(job, "RequestMemory", 0)
+                rss_kb = safe_int(job, "ResidentSetSize", 0)
+                mem_usage_mb = safe_int(job, "MemoryUsage", 0)
+                prov_mb = float(safe_int(job, "MemoryProvisioned", 0))
+                img_mb = safe_int(job, "ImageSize", 0) / 1024.0
+                actual_mem_mb = (rss_kb / 1024.0) or mem_usage_mb or prov_mb or img_mb
+                is_gpu = req_gpus >= 1
+                cluster = "gpu" if is_gpu else "cpu"
+
+                remote_host = safe_get(job, "RemoteHost",
+                                       safe_get(job, "LastRemoteHost", ""))
+                node = node_short(remote_host) if remote_host else "unknown"
+                rtype = gpu_type_for_node(node) if is_gpu else "CPU"
+
+                if status == 2:  # Running
+                    acc_running[cluster] += 1
+                    job_start = safe_get(job, "JobStartDate", now) or now
+                    duration = max(now - job_start, 0)
+                    job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
+                    lbl = dict(cluster=cluster, user=detail_user,
+                               job_id=job_id, resource_type=rtype, node=node)
+                    cpu_secs = safe_int(job, "TotalJobRunningCpuUsage", 0) or (
+                        safe_int(job, "RemoteUserCpu", 0) + safe_int(job, "RemoteSysCpu", 0)
+                    )
+                    cpu_eff = cpu_secs / max(duration * max(req_cpus, 1), 1e-6)
+                    vram_per_gpu = _vram_per_gpu_by_node.get(node, 0)
+
+                    job_duration_seconds.labels(**lbl).set(duration)
+                    job_gpus_requested.labels(**lbl).set(req_gpus)
+                    job_cpus_requested.labels(**lbl).set(req_cpus)
+                    job_memory_requested_mb.labels(**lbl).set(req_mem_mb)
+                    job_memory_usage_mb.labels(**lbl).set(actual_mem_mb)
+                    job_cpu_efficiency.labels(**lbl).set(cpu_eff)
+                    job_vram_allocated_mb.labels(**lbl).set(req_gpus * vram_per_gpu)
+
+                    if is_gpu:
+                        raw = (safe_get(job, "AssignedGPUs", "") or "").strip('" ')
+                        gpu_uuid = raw.lower().removeprefix("gpu-")
+                        node_jobs.append(dict(
+                            job_id=job_id, node=node, gpu_uuid=gpu_uuid,
+                            req_cpus=req_cpus, cluster=cluster, user=detail_user,
+                        ))
+
+                elif status == 1:  # Queued
+                    acc_queued[cluster] += 1
+
+        for cl in set(list(acc_running) + list(acc_queued)):
+            user_jobs_running.labels(cluster=cl, user=detail_user).set(
+                acc_running.get(cl, 0)
+            )
+            user_jobs_queued.labels(cluster=cl, user=detail_user).set(
+                acc_queued.get(cl, 0)
+            )
+
+        global _current_node_jobs
+        _current_node_jobs = node_jobs
+
+        last_scrape_success.set(1)
+        last_scrape_duration_seconds.set(time.time() - t0)
+        last_scrape_timestamp.set(now)
+        log.debug(
+            f"Personal scrape {time.time()-t0:.2f}s — "
+            f"{sum(acc_running.values())} running, {sum(acc_queued.values())} queued"
+        )
+
+    except Exception as exc:
+        last_scrape_success.set(0)
+        last_scrape_duration_seconds.set(time.time() - t0)
+        log.error(f"Personal scrape failed: {exc}", exc_info=True)
+
+
+def _cluster_loop(collector_host: str, detail_user: str, interval: int) -> None:
+    """Slow background loop for cluster-wide HTCondor metrics."""
+    while True:
+        scrape(collector_host, detail_user)
+        time.sleep(interval)
+
+
+def _node_exporter_loop(interval: int) -> None:
+    """Fast loop that polls worker-node metrics independently of the HTCondor scrape."""
+    while True:
+        jobs = _current_node_jobs
+        if jobs:
+            try:
+                _scrape_worker_nodes(jobs, time.time())
+            except Exception as exc:
+                log.error(f"Node exporter fast-loop error: {exc}", exc_info=True)
+        time.sleep(interval)
+
+
+# =============================================================================
 # Entry point
 # =============================================================================
 
@@ -587,26 +1137,71 @@ def main():
                         help="Port to expose metrics on (default: 9118)")
     parser.add_argument("--collector", type=str, default="stbc-019.nikhef.nl",
                         help="HTCondor collector hostname (default: stbc-019.nikhef.nl)")
-    parser.add_argument("--interval", type=int, default=15,
-                        help="Scrape interval in seconds (default: 15)")
+    parser.add_argument("--interval", type=int, default=3,
+                        help="Personal job poll interval in seconds (default: 3)")
+    parser.add_argument("--full", action="store_true",
+                        help="Also run cluster-wide monitoring (all users, slot stats)")
+    parser.add_argument("--cluster-interval", type=int, default=30,
+                        help="Cluster-wide scan interval when --full is active (default: 30)")
     parser.add_argument("--detail-user", type=str, default="your_username",
                         help="User whose CPU jobs get per-job detail (default: your_username). "
                              "GPU per-job detail is always emitted for everyone.")
+    parser.add_argument("--node-exporter-port", type=int, default=9100,
+                        help="Port of node_exporter on worker nodes (default: 9100)")
+    parser.add_argument("--node-interval", type=int, default=3,
+                        help="Poll interval in seconds for worker-node GPU/cgroup metrics (default: 3)")
+    parser.add_argument("--log-dir", type=str, default="",
+                        help="Directory containing .out log files; enables log HTTP server")
+    parser.add_argument("--log-port", type=int, default=9119,
+                        help="Port for the log HTTP server (default: 9119)")
     args = parser.parse_args()
 
     log.info("Starting Stoomboot GPU+CPU Prometheus exporter")
-    log.info(f"  bindings:    {HTCONDOR_BINDINGS}")
-    log.info(f"  port:        {args.port}")
-    log.info(f"  collector:   {args.collector}")
-    log.info(f"  interval:    {args.interval}s")
-    log.info(f"  detail user: {args.detail_user} (CPU per-job detail)")
+    log.info(f"  bindings:       {HTCONDOR_BINDINGS}")
+    log.info(f"  port:           {args.port}")
+    log.info(f"  collector:      {args.collector}")
+    log.info(f"  personal user:  {args.detail_user} (fast loop every {args.interval}s)")
+    log.info(f"  cluster scan:   {'every ' + str(args.cluster_interval) + 's (background)' if args.full else 'disabled (use --full to enable)'}")
+    log.info(f"  node-exporter:  :{args.node_exporter_port} on workers every {args.node_interval}s")
+
+    global _node_exporter_port, _collector_host
+    _node_exporter_port = args.node_exporter_port
+    _collector_host = args.collector
+
+    if args.log_dir:
+        global _log_dir
+        _log_dir = args.log_dir
+        log.info(f"  log dir:        {args.log_dir}")
+        log.info(f"  log port:       {args.log_port}")
 
     start_http_server(args.port)
     exporter_up.set(1)
-    log.info(f"Metrics available at http://localhost:{args.port}/metrics")
+    log.info(f"Metrics at http://localhost:{args.port}/metrics")
 
+    if args.log_dir:
+        try:
+            _start_log_server(args.log_port)
+        except OSError as exc:
+            log.warning(f"Log server port {args.log_port} in use ({exc}) — skipping log server")
+
+    # Cluster-wide background scan (only when --full)
+    if args.full:
+        threading.Thread(
+            target=_cluster_loop,
+            args=(args.collector, args.detail_user, args.cluster_interval),
+            daemon=True, name="cluster-loop",
+        ).start()
+
+    # Worker-node GPU/cgroup fast poll
+    threading.Thread(
+        target=_node_exporter_loop,
+        args=(args.node_interval,),
+        daemon=True, name="node-exporter-loop",
+    ).start()
+
+    # Personal job fast poll (main thread)
     while True:
-        scrape(args.collector, args.detail_user)
+        scrape_personal(args.collector, args.detail_user)
         time.sleep(args.interval)
 
 

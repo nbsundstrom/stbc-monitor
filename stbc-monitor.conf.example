@@ -37,3 +37,11 @@ REPO_URL=""
 # Local ports for the SSH tunnel (what you open in your browser).
 PORT_GRAFANA="3000"
 PORT_PROMETHEUS="9090"
+
+# Directory on the cluster where your HTCondor job .out log files are written.
+# Set this to enable the "Job Log Output" panel in the personal dashboard.
+# Example: "/data/alice/nsundstr/grapf/scripts/stbc/logs"
+LOG_DIR=""
+
+# Port for the log HTTP server on the cluster (forwarded via SSH tunnel).
+PORT_LOG="9119"

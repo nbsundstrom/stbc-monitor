@@ -1,5 +1,5 @@
 global:
-  scrape_interval: 15s      # match --interval on the exporter (live-ish data)
+  scrape_interval: 3s       # fast scrape to capture per-job worker-node metrics
   evaluation_interval: 15s
 
 scrape_configs:

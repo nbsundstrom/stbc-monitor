@@ -32,12 +32,16 @@ REPO_URL="${STBC_REPO_URL:-}"
 CLUSTER_USER="${STBC_CLUSTER_USER:-}"
 PORT_GRAFANA="${STBC_PORT_GRAFANA:-3000}"
 PORT_PROMETHEUS="${STBC_PORT_PROMETHEUS:-9090}"
+PORT_LOG="${STBC_PORT_LOG:-9119}"
+LOG_DIR="${STBC_LOG_DIR:-}"
 
 CONF="${HOME}/.stbc-monitor.conf"
 # shellcheck disable=SC1090
 [[ -f "$CONF" ]] && source "$CONF"
 
 CLUSTER_USER="${CLUSTER_USER:-$SSH_USER}"
+LOG_DIR="${LOG_DIR:-}"
+PORT_LOG="${PORT_LOG:-9119}"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Local Grafana data dir (keeps dashboards/db separate from any brew defaults)
@@ -150,11 +154,15 @@ admin_password = stbc_monitor
 [analytics]
 reporting_enabled = false
 check_for_updates = false
+
+[panels]
+disable_sanitize_html = true
 EOF
 
-    # datasources — copy as-is (already points at localhost:9090)
-    cp "${LOCAL_DIR}/grafana/provisioning/datasources/prometheus.yml" \
-        "${prov_dir}/datasources/prometheus.yml"
+    # datasources — substitute the configured Prometheus port
+    sed "s|localhost:[0-9]*|localhost:${PORT_PROMETHEUS}|g" \
+        "${LOCAL_DIR}/grafana/provisioning/datasources/prometheus.yml" \
+        > "${prov_dir}/datasources/prometheus.yml"
 
     # dashboards provider — rewrite path to our local dir
     cat > "${prov_dir}/dashboards/dashboards.yml" <<EOF
@@ -237,18 +245,21 @@ open_browser() {
 
 # ── Actions ───────────────────────────────────────────────────────────────────
 ACTION="start"
-case "${1:-}" in
-    --setup)   ACTION="setup" ;;
-    --stop)    ACTION="stop" ;;
-    --status)  ACTION="status" ;;
-    --restart) ACTION="restart" ;;
-    --logs)    ACTION="logs" ;;
-    "")        ACTION="start" ;;
-    -h|--help)
-        sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-        exit 0 ;;
-    *) error "Unknown argument: $1 (try --help)"; exit 1 ;;
-esac
+FULL_MODE=false
+for _arg in "$@"; do
+    case "$_arg" in
+        --setup)   ACTION="setup" ;;
+        --stop)    ACTION="stop" ;;
+        --status)  ACTION="status" ;;
+        --restart) ACTION="restart" ;;
+        --logs)    ACTION="logs" ;;
+        --full)    FULL_MODE=true ;;
+        -h|--help)
+            sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) error "Unknown argument: $_arg (try --help)"; exit 1 ;;
+    esac
+done
 
 echo ""
 info "Target: ${SSH_TARGET}$( [[ -n "$SSH_JUMP" ]] && echo "  (via ${SSH_JUMP})" )"
@@ -274,10 +285,20 @@ case "$ACTION" in
         info "Ensuring cluster services are running (exporter + Prometheus)..."
         remote "cd '${REMOTE_DIR}' && bash setup.sh \
             --port-prometheus ${PORT_PROMETHEUS} \
-            --default-user '${CLUSTER_USER}'"
+            --default-user '${CLUSTER_USER}' \
+            --log-dir '${LOG_DIR}' \
+            --log-port '${PORT_LOG}' \
+            $( $FULL_MODE && echo '--full' )"
+        # Read back the actual port chosen by setup.sh (may differ if requested port was busy)
+        _actual_port=$(ssh "${ssh_opts[@]}" "$SSH_TARGET" \
+            "cat '${REMOTE_DIR}/pids/prometheus.port' 2>/dev/null" 2>/dev/null | tr -d '[:space:]')
+        if [[ "$_actual_port" =~ ^[0-9]+$ ]]; then
+            PORT_PROMETHEUS="$_actual_port"
+        fi
         start_local_grafana
         echo ""
         info "Opening SSH tunnel:  localhost:${PORT_PROMETHEUS} → cluster Prometheus"
+        [[ -n "$LOG_DIR" ]] && info "                     localhost:${PORT_LOG} → cluster log server"
         info "Grafana login: admin / stbc_monitor"
         echo ""
         info "Browser will open shortly. Press Ctrl-C to stop everything."
@@ -290,11 +311,11 @@ case "$ACTION" in
             info "All services stopped."
         }
         trap '_cleanup; exit 0' INT TERM
-        ( sleep 4; open_browser "http://localhost:${PORT_GRAFANA}/d/stbc-details" ) &
-        # Tunnel only Prometheus — Grafana runs locally
-        ssh ${ssh_opts[@]+"${ssh_opts[@]}"} -N \
-            -L "${PORT_PROMETHEUS}:localhost:${PORT_PROMETHEUS}" \
-            "$SSH_TARGET" || true
+        ( sleep 4; open_browser "http://localhost:${PORT_GRAFANA}/d/stbc-personal" ) &
+        # Build tunnel args — always forward Prometheus, add log port if configured
+        _tunnel_args=(-N -L "${PORT_PROMETHEUS}:localhost:${PORT_PROMETHEUS}")
+        [[ -n "$LOG_DIR" ]] && _tunnel_args+=(-L "${PORT_LOG}:localhost:${PORT_LOG}")
+        ssh ${ssh_opts[@]+"${ssh_opts[@]}"} "${_tunnel_args[@]}" "$SSH_TARGET" || true
         trap - INT TERM
         ;;
 
@@ -302,7 +323,10 @@ case "$ACTION" in
         deploy
         remote "cd '${REMOTE_DIR}' && bash setup.sh --restart \
             --port-prometheus ${PORT_PROMETHEUS} \
-            --default-user '${CLUSTER_USER}'"
+            --default-user '${CLUSTER_USER}' \
+            --log-dir '${LOG_DIR}' \
+            --log-port '${PORT_LOG}' \
+            $( $FULL_MODE && echo '--full' )"
         stop_local_grafana
         start_local_grafana
         info "Services restarted. Run ./stbc-monitor.sh to view."

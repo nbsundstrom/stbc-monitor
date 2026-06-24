@@ -62,9 +62,9 @@
           "type": "prometheus",
           "uid": "stbc-prometheus"
         },
-        "definition": "label_values(stoomboot_user_jobs_running{cluster=~\"$cluster\"}, user)",
+        "definition": "query_result(sort_desc(stoomboot_user_jobs_running{cluster=~\"$cluster\"}))",
         "query": {
-          "query": "label_values(stoomboot_user_jobs_running{cluster=~\"$cluster\"}, user)",
+          "query": "query_result(sort_desc(stoomboot_user_jobs_running{cluster=~\"$cluster\"}))",
           "refId": "userVar"
         },
         "current": {
@@ -75,9 +75,9 @@
         "allValue": ".*",
         "multi": false,
         "refresh": 2,
-        "sort": 1,
+        "sort": 0,
         "hide": 0,
-        "regex": ""
+        "regex": "/.*user=\"([^\"]+)\".*/"
       },
       {
         "name": "job",
@@ -100,7 +100,7 @@
         "allValue": ".*",
         "multi": false,
         "refresh": 2,
-        "sort": 1,
+        "sort": 4,
         "hide": 0,
         "regex": ""
       }
@@ -502,7 +502,7 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Memory efficiency per running job (used / requested)",
+      "title": "Resource utilisation per running job",
       "datasource": {
         "type": "prometheus",
         "uid": "stbc-prometheus"
@@ -519,33 +519,61 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "stoomboot_job_memory_usage_mb{cluster=~\"$cluster\"} / clamp_min(stoomboot_job_memory_requested_mb{cluster=~\"$cluster\"}, 1)",
-          "legendFormat": "{{user}} · {{job_id}}",
+          "expr": "stoomboot_job_memory_usage_mb{cluster=~\"$cluster\", user=~\"$user\"} / clamp_min(stoomboot_job_memory_requested_mb{cluster=~\"$cluster\", user=~\"$user\"}, 1)",
+          "legendFormat": "{{user}} · {{job_id}} · RAM",
           "instant": false,
           "format": "time_series",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "stbc-prometheus"
+          },
+          "expr": "stoomboot_job_cpu_efficiency{cluster=~\"$cluster\", user=~\"$user\"}",
+          "legendFormat": "{{user}} · {{job_id}} · CPU",
+          "instant": false,
+          "format": "time_series",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "stbc-prometheus"
+          },
+          "expr": "stoomboot_job_vram_allocated_mb{cluster=~\"$cluster\", user=~\"$user\"}",
+          "legendFormat": "{{user}} · {{job_id}} · VRAM",
+          "instant": false,
+          "format": "time_series",
+          "refId": "C"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
           "min": 0,
+          "max": 1,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "showPoints": "never",
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
             "lineWidth": 2
           },
           "color": {
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": ".* · VRAM"},
+            "properties": [
+              {"id": "unit", "value": "decmbytes"},
+              {"id": "custom.axisPlacement", "value": "right"},
+              {"id": "custom.axisLabel", "value": "VRAM (MB)"}
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -754,8 +782,8 @@
             "type": "prometheus",
             "uid": "stbc-prometheus"
           },
-          "expr": "stoomboot_job_gpus_requested{cluster=~\"$cluster\", user=~\"$user\", job_id=~\"$job\"}",
-          "legendFormat": "{{job_id}} · GPUs",
+          "expr": "stoomboot_job_vram_allocated_mb{cluster=~\"$cluster\", user=~\"$user\", job_id=~\"$job\"}",
+          "legendFormat": "{{job_id}} · VRAM",
           "instant": false,
           "format": "time_series",
           "refId": "C"
@@ -765,10 +793,11 @@
         "defaults": {
           "unit": "percentunit",
           "min": 0,
+          "max": 1,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
-            "fillOpacity": 5,
+            "fillOpacity": 0,
             "showPoints": "never",
             "lineWidth": 2
           },
@@ -778,11 +807,11 @@
         },
         "overrides": [
           {
-            "matcher": {"id": "byRegexp", "options": ".* · GPUs"},
+            "matcher": {"id": "byRegexp", "options": ".* · VRAM"},
             "properties": [
-              {"id": "unit", "value": "none"},
+              {"id": "unit", "value": "decmbytes"},
               {"id": "custom.axisPlacement", "value": "right"},
-              {"id": "custom.axisLabel", "value": "GPUs"},
+              {"id": "custom.axisLabel", "value": "VRAM (MB)"},
               {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [8, 4]}}
             ]
           }
