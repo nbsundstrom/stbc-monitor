@@ -385,6 +385,20 @@ def safe_int(ad, key, default=0):
     return default
 
 
+def safe_float(ad, key, default=0.0):
+    """Like safe_int but preserves fractional values. Use for CPU-seconds, etc."""
+    val = safe_get(ad, key, None)
+    if val is not None:
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            pass
+    try:
+        return float(ad.eval(key))
+    except Exception:
+        return default
+
+
 def safe_memory_mb(ad, key, default=0):
     val = safe_get(ad, key, None)
     parsed = _parse_memory_mb(val)
@@ -655,8 +669,8 @@ def scrape(collector_host: str, detail_user: str):
                         job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
                         lbl = dict(cluster=cluster, user=owner, job_id=job_id,
                                    resource_type=rtype, node=node)
-                        cpu_secs_used = safe_int(job, "TotalJobRunningCpuUsage", 0) or (
-                            safe_int(job, "RemoteUserCpu", 0) + safe_int(job, "RemoteSysCpu", 0)
+                        cpu_secs_used = safe_float(job, "TotalJobRunningCpuUsage", 0) or (
+                            safe_float(job, "RemoteUserCpu", 0) + safe_float(job, "RemoteSysCpu", 0)
                         )
                         cpu_eff = cpu_secs_used / max(duration * max(req_cpus, 1), 1e-6)
                         job_duration_seconds.labels(**lbl).set(duration)
@@ -996,6 +1010,15 @@ def _start_log_server(port: int):
     log.info(f"Log server on :{port} — serving {_log_dir!r}")
 
 
+_PERSONAL_GAUGES = [
+    user_jobs_running, user_jobs_queued, user_compute_seconds,
+    user_units_in_use,
+    job_duration_seconds, job_gpus_requested, job_cpus_requested,
+    job_memory_requested_mb, job_memory_usage_mb, job_cpu_efficiency,
+    job_vram_allocated_mb, job_status_gauge,
+]
+
+
 def scrape_personal(collector_host: str, detail_user: str) -> None:
     """Fast scrape: only the detail user's own running jobs.
     Updates per-job metrics and _current_node_jobs for the node_exporter loop.
@@ -1003,6 +1026,10 @@ def scrape_personal(collector_host: str, detail_user: str) -> None:
     """
     t0 = time.time()
     now = t0
+
+    # Clear personal-loop gauges so old finished jobs disappear immediately
+    for g in _PERSONAL_GAUGES:
+        g.clear()
     try:
         coll = htcondor.Collector(collector_host)
         schedd_ads = coll.query(
@@ -1058,8 +1085,8 @@ def scrape_personal(collector_host: str, detail_user: str) -> None:
                     job_id = f"{safe_get(job, 'ClusterId', 0)}.{safe_get(job, 'ProcId', 0)}"
                     lbl = dict(cluster=cluster, user=detail_user,
                                job_id=job_id, resource_type=rtype, node=node)
-                    cpu_secs = safe_int(job, "TotalJobRunningCpuUsage", 0) or (
-                        safe_int(job, "RemoteUserCpu", 0) + safe_int(job, "RemoteSysCpu", 0)
+                    cpu_secs = safe_float(job, "TotalJobRunningCpuUsage", 0) or (
+                        safe_float(job, "RemoteUserCpu", 0) + safe_float(job, "RemoteSysCpu", 0)
                     )
                     cpu_eff = cpu_secs / max(duration * max(req_cpus, 1), 1e-6)
                     vram_per_gpu = _vram_per_gpu_by_node.get(node, 0)
