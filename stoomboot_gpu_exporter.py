@@ -34,6 +34,7 @@ import http.server
 import logging
 import os
 import re
+import subprocess
 import threading
 import time
 import urllib.request
@@ -315,7 +316,7 @@ _vram_per_gpu_by_node: dict = {}
 _collector_host: str = "stbc-019.nikhef.nl"
 
 # HTCondor GPU metrics cache (avoids querying collector every loop iteration)
-_htcondor_gpu_cache: dict = {}   # {job_id: {util_pct, mem_used_mb, mem_total_mb}}
+_htcondor_gpu_cache: dict = {}   # {job_id: {util_pct, mem_used_mb, mem_total_mb, pid}}
 _htcondor_gpu_cache_time: float = 0
 _HTCONDOR_GPU_CACHE_TTL: float = 15  # seconds
 
@@ -331,6 +332,87 @@ def _invalidate_htcondor_cache() -> None:
     global _htcondor_gpu_cache, _htcondor_gpu_cache_time
     _htcondor_gpu_cache = {}
     _htcondor_gpu_cache_time = 0
+
+
+# SSH /proc polling — real-time RSS that bypasses the startd's slow
+# 1-5 minute ClassAd update interval. One SSH per node per scrape,
+# throttled per-job to avoid hammering the worker.
+_last_ssh_poll: dict = {}        # {(job_id, node): last_poll_unix_time}
+_ssh_poll_interval: float = 10.0  # seconds; set by --ssh-interval
+_ssh_user: str = ""              # set by --ssh-user; empty disables SSH path
+_SSH_TIMEOUT: float = 3.0        # per-call hard timeout
+
+
+def _should_ssh_poll(job_id: str, node: str) -> bool:
+    """Return True if it's been longer than _ssh_poll_interval since we last
+    SSH-polled this job. New (never-polled) jobs always return True."""
+    if not _ssh_user:
+        return False
+    last = _last_ssh_poll.get((job_id, node))
+    if last is None:
+        return True
+    return (time.time() - last) >= _ssh_poll_interval
+
+
+def _mark_ssh_polled(job_id: str, node: str) -> None:
+    _last_ssh_poll[(job_id, node)] = time.time()
+
+
+def _parse_proc_status_batch(stdout: str, pids: list) -> dict:
+    """Parse the output of a batched SSH that read /proc/<pid>/status for
+    each pid. Output format: blocks separated by `==<pid>==` markers.
+    Returns {pid: mem_mb} — PIDs whose block is missing or has no VmRSS
+    are silently skipped."""
+    result: dict = {}
+    # Split on the delimiter; blocks[0] is whatever came before the first marker
+    blocks = re.split(r"==(\d+)==", stdout)
+    # blocks looks like: ['', '100', '<status of 100>', '200', '<status of 200>', ...]
+    for i in range(1, len(blocks) - 1, 2):
+        try:
+            pid = int(blocks[i])
+        except ValueError:
+            continue
+        body = blocks[i + 1]
+        m = re.search(r"VmRSS:\s+(\d+)\s+kB", body)
+        if m:
+            result[pid] = float(m.group(1)) / 1024.0
+    return result
+
+
+def _fetch_ssh_memory_batch(node: str, pids: list) -> dict:
+    """SSH to `node` and read /proc/<pid>/status for each pid in pids.
+    Returns {pid: mem_mb} on success, {} on any failure (timeout,
+    unreachable, auth error, missing process). One SSH session per node
+    regardless of how many PIDs are requested — uses `==<pid>==` markers
+    in the output to delimit per-process blocks."""
+    if not pids or not _ssh_user:
+        return {}
+    ssh_target = f"{_ssh_user}@{node}.nikhef.nl"
+    # One remote command per PID, chained with `;`; each block delimited
+    # by an echo marker so we can split cleanly. `2>/dev/null` swallows
+    # "No such file or directory" for PIDs that have exited.
+    parts = []
+    for pid in pids:
+        parts.append(f"echo =={pid}==; cat /proc/{pid}/status 2>/dev/null")
+    remote_cmd = " ; ".join(parts)
+
+    try:
+        completed = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={int(_SSH_TIMEOUT)}",
+             "-o", "StrictHostKeyChecking=accept-new",
+             ssh_target, remote_cmd],
+            capture_output=True, text=True, timeout=_SSH_TIMEOUT, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.debug(f"ssh {ssh_target} failed: {exc}")
+        return {}
+
+    if completed.returncode != 0:
+        log.debug(f"ssh {ssh_target} rc={completed.returncode}: "
+                  f"{(completed.stderr or '')[:200]}")
+        return {}
+
+    return _parse_proc_status_batch(completed.stdout, pids)
 
 
 def node_short(machine_name: str) -> str:
@@ -888,7 +970,7 @@ def _fetch_htcondor_gpu_metrics(nodes: list) -> dict:
         constraint = _build_startd_job_constraint(nodes)
 
         for ad in coll.query(htcondor.AdTypes.Startd, projection=[
-            "Name", "Machine", "JobId",
+            "Name", "Machine", "JobId", "JobPid",
             "DeviceGPUsAverageUsage", "GPUsMemoryUsage",
             "GPUs_GlobalMemoryMb",
             "CPUsUsage", "ResidentSetSize", "MemoryUsage",
@@ -898,6 +980,15 @@ def _fetch_htcondor_gpu_metrics(nodes: list) -> dict:
             if not job_id:
                 continue
             entry = {}
+
+            # JobPid enables the SSH /proc fallback for fresher-than-startd
+            # memory. Strip quotes (ClassAd string format) and require int.
+            raw_pid = ad.get("JobPid")
+            if raw_pid is not None:
+                try:
+                    entry["pid"] = int(str(raw_pid).strip('" '))
+                except (TypeError, ValueError):
+                    pass
 
             util = ad.get("DeviceGPUsAverageUsage")
             if util is not None:
@@ -1014,6 +1105,25 @@ def _scrape_worker_nodes(node_jobs: list, now: float) -> None:
             log.warning(f"HTCondor GPU metrics fallback failed: {exc}")
             return
 
+        # Per-node SSH /proc poll: real-time RSS for jobs that have a PID and
+        # are due for a poll. One SSH per node regardless of job count. Failures
+        # silently fall through to the startd value written below.
+        ssh_results: dict = {}   # job_id -> mem_mb
+        if _ssh_user:
+            for node, jobs in fallback_nodes.items():
+                pids_to_poll = []
+                pid_to_job_id = {}
+                for j in jobs:
+                    pid = htcondor_metrics.get(j["job_id"], {}).get("pid")
+                    if pid and _should_ssh_poll(j["job_id"], node):
+                        pids_to_poll.append(pid)
+                        pid_to_job_id[pid] = j["job_id"]
+                if pids_to_poll:
+                    ssh_mem = _fetch_ssh_memory_batch(node, pids_to_poll)
+                    for pid, mem_mb in ssh_mem.items():
+                        ssh_results[pid_to_job_id[pid]] = mem_mb
+                        _mark_ssh_polled(pid_to_job_id[pid], node)
+
         for node, jobs in fallback_nodes.items():
             for j in jobs:
                 job_id = j["job_id"]
@@ -1037,8 +1147,12 @@ def _scrape_worker_nodes(node_jobs: list, now: float) -> None:
                     req_cpus = j.get("req_cpus", 1)
                     eff = float(m["cpu_usage"]) / max(req_cpus, 1)
                     job_cpu_efficiency.labels(**lbl_job).set(eff)
-                if m.get("memory_usage_mb") is not None:
-                    job_memory_usage_mb.labels(**lbl_job).set(m["memory_usage_mb"])
+                # SSH /proc RSS wins when available — it's real-time, while
+                # the startd ClassAd updates every 1-5 minutes. Falls through
+                # to the startd value if SSH didn't return data for this job.
+                mem_to_write = ssh_results.get(job_id, m.get("memory_usage_mb"))
+                if mem_to_write is not None:
+                    job_memory_usage_mb.labels(**lbl_job).set(mem_to_write)
 
 
 # =============================================================================
@@ -1355,6 +1469,13 @@ def main():
                         help="Directory containing .out log files; enables log HTTP server")
     parser.add_argument("--log-port", type=int, default=9119,
                         help="Port for the log HTTP server (default: 9119)")
+    parser.add_argument("--ssh-user", type=str, default=os.environ.get("USER", ""),
+                        help="SSH user for /proc polling on worker nodes. "
+                             "Default: $USER. Empty disables the SSH path (fall "
+                             "back to startd ClassAds only).")
+    parser.add_argument("--ssh-interval", type=int, default=10,
+                        help="Minimum seconds between SSH /proc polls for the "
+                             "same job. Default: 10.")
     args = parser.parse_args()
 
     log.info("Starting Stoomboot GPU+CPU Prometheus exporter")
@@ -1365,9 +1486,15 @@ def main():
     log.info(f"  cluster scan:   {'every ' + str(args.cluster_interval) + 's (background)' if args.full else 'disabled (use --full to enable)'}")
     log.info(f"  node-exporter:  :{args.node_exporter_port} on workers every {args.node_interval}s")
 
-    global _node_exporter_port, _collector_host
+    global _node_exporter_port, _collector_host, _ssh_user, _ssh_poll_interval
     _node_exporter_port = args.node_exporter_port
     _collector_host = args.collector
+    _ssh_user = args.ssh_user
+    _ssh_poll_interval = float(args.ssh_interval)
+    if _ssh_user:
+        log.info(f"  ssh /proc poll:  user={_ssh_user}, interval={_ssh_poll_interval}s")
+    else:
+        log.info("  ssh /proc poll:  disabled (use --ssh-user to enable)")
 
     if args.log_dir:
         global _log_dir

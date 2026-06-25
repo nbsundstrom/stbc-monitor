@@ -422,5 +422,215 @@ class TestStartdCacheInvalidatedOnNewJob(unittest.TestCase):
         self.assertEqual(exp._htcondor_gpu_cache, {"300.0": {"memory_usage_mb": 512}})
 
 
+class TestFetchSshMemoryBatch(unittest.TestCase):
+    """_fetch_ssh_memory_batch SSHes to a worker node, reads
+    /proc/<pid>/status for one or more PIDs, and returns {pid: mem_mb}.
+    This is the real-time RSS path that bypasses the startd's slow
+    1-5 minute update interval."""
+
+    def setUp(self):
+        # Reset throttle state and enable SSH path (empty _ssh_user short-circuits)
+        import stoomboot_gpu_exporter as exp
+        exp._last_ssh_poll = {}
+        exp._ssh_user = "testuser"
+
+    def _mock_ssh(self, stdout="", returncode=0, side_effect=None):
+        """Patch subprocess.run to return a fake ssh result."""
+        import subprocess
+        import stoomboot_gpu_exporter as exp
+        result = unittest.mock.MagicMock()
+        result.stdout = stdout
+        result.stderr = ""
+        result.returncode = returncode
+        if side_effect is not None:
+            run = unittest.mock.MagicMock(side_effect=side_effect)
+        else:
+            run = unittest.mock.MagicMock(return_value=result)
+        patcher = unittest.mock.patch.object(exp.subprocess, "run", run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return run
+
+    def test_parses_vmrss_for_single_pid(self):
+        # /proc/PID/status output — VmRSS is in kB
+        proc_status = (
+            "Name:	python3\n"
+            "VmSize:	   12345 kB\n"
+            "VmRSS:	   4096 kB\n"
+            "VmData:	    512 kB\n"
+        )
+        # Format: each PID wrapped in ==<pid>== delimiter markers
+        ssh_output = f"==100==\n{proc_status}"
+        self._mock_ssh(stdout=ssh_output)
+        from stoomboot_gpu_exporter import _fetch_ssh_memory_batch
+        out = _fetch_ssh_memory_batch("wn-lot-007", [100])
+        self.assertAlmostEqual(out[100], 4.0, places=3)  # 4096 kB = 4 MB
+
+    def test_parses_vmrss_for_multiple_pids(self):
+        block_a = "==100==\nVmRSS:	   2048 kB\n"
+        block_b = "==200==\nVmRSS:	  10240 kB\n"
+        self._mock_ssh(stdout=block_a + block_b)
+        from stoomboot_gpu_exporter import _fetch_ssh_memory_batch
+        out = _fetch_ssh_memory_batch("wn-lot-007", [100, 200])
+        self.assertAlmostEqual(out[100], 2.0, places=3)
+        self.assertAlmostEqual(out[200], 10.0, places=3)
+
+    def test_skips_pid_whose_proc_status_is_missing(self):
+        # PID 200's `cat /proc/200/status` returned nothing (job died, wrong
+        # node, or PID reused). The function should silently skip it.
+        block_a = "==100==\nVmRSS:	   8192 kB\n"
+        # No block for PID 200
+        self._mock_ssh(stdout=block_a)
+        from stoomboot_gpu_exporter import _fetch_ssh_memory_batch
+        out = _fetch_ssh_memory_batch("wn-lot-007", [100, 200])
+        self.assertIn(100, out)
+        self.assertNotIn(200, out)
+
+    def test_returns_empty_dict_on_empty_pid_list(self):
+        run = self._mock_ssh()
+        from stoomboot_gpu_exporter import _fetch_ssh_memory_batch
+        out = _fetch_ssh_memory_batch("wn-lot-007", [])
+        self.assertEqual(out, {})
+        run.assert_not_called()  # Don't even attempt SSH
+
+    def test_returns_empty_dict_on_ssh_timeout(self):
+        import subprocess
+        self._mock_ssh(side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=3))
+        from stoomboot_gpu_exporter import _fetch_ssh_memory_batch
+        out = _fetch_ssh_memory_batch("wn-lot-007", [100])
+        self.assertEqual(out, {})
+
+    def test_returns_empty_dict_on_nonzero_returncode(self):
+        # SSH returns 255 when auth fails or host unreachable
+        self._mock_ssh(stdout="", returncode=255)
+        from stoomboot_gpu_exporter import _fetch_ssh_memory_batch
+        out = _fetch_ssh_memory_batch("wn-lot-007", [100])
+        self.assertEqual(out, {})
+
+
+class TestSshPollThrottle(unittest.TestCase):
+    """_should_ssh_poll gates SSH calls so we don't SSH the same job on
+    every 3s scrape. Default interval: 10s."""
+
+    def setUp(self):
+        import stoomboot_gpu_exporter as exp
+        exp._last_ssh_poll = {}
+        exp._ssh_poll_interval = 10.0
+        exp._ssh_user = "testuser"
+
+    def test_returns_true_for_new_job(self):
+        from stoomboot_gpu_exporter import _should_ssh_poll
+        self.assertTrue(_should_ssh_poll("100.0", "wn-lot-007"))
+
+    def test_returns_false_within_throttle_window(self):
+        from stoomboot_gpu_exporter import _should_ssh_poll, _mark_ssh_polled
+        _mark_ssh_polled("100.0", "wn-lot-007")
+        self.assertFalse(_should_ssh_poll("100.0", "wn-lot-007"))
+
+    def test_returns_true_after_throttle_window_elapses(self):
+        import time
+        from stoomboot_gpu_exporter import _should_ssh_poll, _mark_ssh_polled
+        _mark_ssh_polled("100.0", "wn-lot-007")
+        # Pretend 11s passed
+        import stoomboot_gpu_exporter as exp
+        key = ("100.0", "wn-lot-007")
+        exp._last_ssh_poll[key] = exp._last_ssh_poll[key] - 11.0
+        self.assertTrue(_should_ssh_poll("100.0", "wn-lot-007"))
+
+    def test_throttle_is_per_job(self):
+        # Polling job 100 doesn't throttle job 200
+        from stoomboot_gpu_exporter import _should_ssh_poll, _mark_ssh_polled
+        _mark_ssh_polled("100.0", "wn-lot-007")
+        self.assertFalse(_should_ssh_poll("100.0", "wn-lot-007"))
+        self.assertTrue(_should_ssh_poll("200.0", "wn-lot-007"))
+
+
+class TestScrapeWorkerNodesSshOverrides(unittest.TestCase):
+    """_scrape_worker_nodes must use SSH /proc reads as a fresher source than
+    the startd ClassAd, when a job has a PID and SSH succeeds. The startd
+    updates RSS / MemoryUsage only every 1-5 minutes, but /proc is real-time.
+    Without SSH, the user sees stale RAM for up to several minutes after a
+    job starts; with SSH, RAM updates within the throttle window (default 10s)."""
+
+    def setUp(self):
+        import stoomboot_gpu_exporter as exp
+        exp._htcondor_gpu_cache = {
+            "100.0": {"memory_usage_mb": 999.0, "pid": 1234},  # startd's stale value
+        }
+        exp._htcondor_gpu_cache_time = time.time()  # fresh, so cached value is returned
+        exp._last_ssh_poll = {}
+        exp._ssh_poll_interval = 10.0
+        exp._ssh_user = "testuser"
+        # Clear the metric so we can read fresh values
+        from prometheus_client import REGISTRY
+        # Best-effort: just call .clear() on the gauge if supported; otherwise skip
+        try:
+            exp.job_memory_usage_mb._metrics.clear()
+        except Exception:
+            pass
+
+    def _run_with_ssh_output(self, ssh_stdout, ssh_returncode=0,
+                             ssh_side_effect=None):
+        import subprocess
+        import unittest.mock
+        import stoomboot_gpu_exporter as exp
+        from stoomboot_gpu_exporter import _scrape_worker_nodes
+
+        # Mock subprocess.run for the SSH call
+        if ssh_side_effect is not None:
+            run = unittest.mock.MagicMock(side_effect=ssh_side_effect)
+        else:
+            result = unittest.mock.MagicMock()
+            result.stdout = ssh_stdout
+            result.stderr = ""
+            result.returncode = ssh_returncode
+            run = unittest.mock.MagicMock(return_value=result)
+
+        # Mock the HTCondor collector so _fetch_htcondor_gpu_metrics returns
+        # the pre-seeded cache from setUp.
+        coll = unittest.mock.MagicMock()
+        coll.query = unittest.mock.MagicMock(return_value=[])
+
+        with unittest.mock.patch.object(exp.subprocess, "run", run), \
+             unittest.mock.patch.object(exp.htcondor, "Collector", return_value=coll):
+            job = dict(job_id="100.0", node="wn-lot-007", gpu_uuid="",
+                       req_cpus=4, cluster="cpu", user="testuser")
+            _scrape_worker_nodes([job], time.time())
+        return run
+
+    def test_ssh_value_overrides_startd_value(self):
+        # Startd says 999 MB (stale). SSH says 8 MB (real-time).
+        ssh_out = "==1234==\nVmRSS:	   8192 kB\n"
+        self._run_with_ssh_output(ssh_out)
+        from stoomboot_gpu_exporter import job_memory_usage_mb
+        labels = dict(cluster="cpu", user="testuser", job_id="100.0",
+                      node="wn-lot-007", resource_type="CPU")
+        # 8192 kB = 8 MB
+        v = job_memory_usage_mb.labels(**labels)._value.get()
+        self.assertAlmostEqual(v, 8.0, places=2)
+
+    def test_startd_value_kept_when_ssh_fails(self):
+        # SSH times out — fall back to startd's value
+        import subprocess
+        self._run_with_ssh_output(
+            ssh_stdout="", ssh_side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=3)
+        )
+        from stoomboot_gpu_exporter import job_memory_usage_mb
+        labels = dict(cluster="cpu", user="testuser", job_id="100.0",
+                      node="wn-lot-007", resource_type="CPU")
+        v = job_memory_usage_mb.labels(**labels)._value.get()
+        self.assertAlmostEqual(v, 999.0, places=2)
+
+    def test_ssh_not_called_within_throttle_window(self):
+        import unittest.mock
+        import stoomboot_gpu_exporter as exp
+        from stoomboot_gpu_exporter import _scrape_worker_nodes, _mark_ssh_polled
+        # Mark job as just polled
+        _mark_ssh_polled("100.0", "wn-lot-007")
+        run = self._run_with_ssh_output(ssh_stdout="==1234==\nVmRSS:	   8192 kB\n")
+        # subprocess.run should NOT have been called — we're throttled
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
