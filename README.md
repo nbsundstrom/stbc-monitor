@@ -96,18 +96,13 @@ Anything here can also be passed as an env var with a `STBC_` prefix
 
 ## Dashboards
 
-Two dashboards are provisioned automatically, both refreshing every **15s**:
+One dashboard is provisioned automatically, refreshing every **15s**:
 
-**Stoomboot — Overview** (the general at-a-glance page): a row of big live
-stat tiles (GPU/CPU utilisation, jobs running/queued, idle GPUs, exporter
-health, scrape freshness), utilisation gauges per GPU type and for CPU,
-trend graphs, and a **GPU "who's hogging it" leaderboard** (GPUs held and
-GPU-hours in flight per user).
-
-**Stoomboot — Details** (drill-down): a **Cluster** dropdown at the top
-(GPU / CPU / All) that re-filters every panel, and a **User** dropdown with
-**you pinned as the default**. Per-user stat tiles, your jobs over time, a
-per-job table, and a full cluster leaderboard.
+**Stoomboot — Personal** (the default browser landing page): a **Cluster**
+dropdown (GPU / CPU / All) and a **My Jobs** dropdown pinned to the running
+jobs of the configured `CLUSTER_USER`. Live stat tiles, per-job GPU/CPU/RAM
+timeseries, and a per-job detail table — everything filterable from the top
+bar.
 
 ## What gets monitored
 
@@ -173,10 +168,9 @@ stbc-monitor/
 \- grafana/
    \- provisioning/
       |- datasources/prometheus.yml      <- auto-wires Prometheus datasource
-      \- dashboards/
-         |- dashboards.yml
-         |- stoomboot_overview.json       <- general at-a-glance page
-         \- stoomboot_details.json        <- cluster + user drill-down
+       \- dashboards/
+          |- dashboards.yml
+          \- stbc_personal.json            <- the only dashboard (cluster + my-jobs dropdowns)
 
 grafana_data_local/  (runtime — git-ignored)
   |- grafana.ini      <- generated config pointing at local provisioning

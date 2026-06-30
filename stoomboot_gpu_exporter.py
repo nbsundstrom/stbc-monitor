@@ -29,6 +29,7 @@ are available. If not pip-installable, they're usually on the system already
 """
 
 import argparse
+import glob as _glob_mod
 import html as _html_mod
 import http.server
 import logging
@@ -43,17 +44,15 @@ from typing import Optional
 
 try:
     import htcondor2 as htcondor
-    import classad2 as classad  # noqa: F401  (imported for side effects / availability check)
-    HTCONDOR_BINDINGS = "v2 (htcondor2/classad2)"
+    _binding = "htcondor2"
 except ImportError:
     try:
         import htcondor
-        import classad  # noqa: F401  (imported for side effects / availability check)
-        HTCONDOR_BINDINGS = "v1 (htcondor/classad)"
+        _binding = "htcondor"
     except ImportError as exc:
         raise ImportError(
             "HTCondor Python bindings not found.\n"
-            "Tried htcondor2/classad2 (HTCondor 25+) and htcondor/classad (older).\n"
+            "Tried htcondor2 (HTCondor 25+) and htcondor (older).\n"
             "On Stoomboot they should be available system-wide in /usr/bin/python3.9."
         ) from exc
 
@@ -447,29 +446,6 @@ def safe_get(ad, key, default=None):
         return default
 
 
-_MEM_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([kKmMgGtT]?[bB]?)?\s*$")
-
-
-def _parse_memory_mb(value):
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        m = _MEM_RE.match(value)
-        if not m:
-            return None
-        amount = float(m.group(1))
-        unit = (m.group(2) or "mb").lower()
-        if unit in ("k", "kb"):
-            return amount / 1024.0
-        if unit in ("m", "mb", ""):
-            return amount
-        if unit in ("g", "gb"):
-            return amount * 1024.0
-        if unit in ("t", "tb"):
-            return amount * 1024.0 * 1024.0
-    return None
-
-
 def safe_int(ad, key, default=0):
     val = safe_get(ad, key, None)
     if isinstance(val, (int, float)):
@@ -502,17 +478,6 @@ def safe_float(ad, key, default=0.0):
         return float(ad.eval(key))
     except Exception:
         return default
-
-
-def safe_memory_mb(ad, key, default=0):
-    val = safe_get(ad, key, None)
-    parsed = _parse_memory_mb(val)
-    if parsed is None:
-        try:
-            parsed = _parse_memory_mb(ad.eval(key))
-        except Exception:
-            parsed = None
-    return int(parsed) if parsed is not None else default
 
 
 def _compute_actual_memory_mb(job) -> float:
@@ -762,7 +727,7 @@ def scrape(collector_host: str, detail_user: str):
                 status = safe_int(job, "JobStatus", 0)
                 req_gpus = safe_int(job, "RequestGPUs", 0)
                 req_cpus = safe_int(job, "RequestCpus", 1)
-                req_mem_mb = safe_memory_mb(job, "RequestMemory", 0)
+                req_mem_mb = safe_int(job, "RequestMemory", 0)
                 rss_kb = safe_int(job, "ResidentSetSize", 0)
                 sched_mem_usage_mb = safe_int(job, "MemoryUsage", 0)
                 # Only count "real" memory (RSS or MemoryUsage), not the
@@ -1174,19 +1139,25 @@ class _LogHandler(http.server.BaseHTTPRequestHandler):
         self._serve_index()
 
     def _serve_job(self, job_id: str):
-        # Try: <job_id>.out → <cluster_id>.out → <cluster_id>_<proc_id>.out
+        # Try the canonical forms first, then a glob to catch prefixed names
+        # like myjob_12345_0.out. On Stoomboot the underscore form is most common.
         candidates = [f"{job_id}.out"]
         if "." in job_id:
-            candidates.append(f"{job_id.split('.')[0]}.out")
             candidates.append(f"{job_id.replace('.', '_')}.out")
         for name in candidates:
             p = os.path.join(_log_dir, name)
             if os.path.isfile(p):
                 self._send_log(p, name)
                 return
+        for pattern in {f"*{job_id}.out", f"*{job_id.replace('.', '_')}.out"}:
+            globbed = _glob_mod.glob(os.path.join(_log_dir, pattern))
+            if globbed:
+                p = globbed[0]
+                self._send_log(p, os.path.basename(p))
+                return
         msg = f"No log found for job {job_id}\n\nTried:\n" + "\n".join(
             f"  {os.path.join(_log_dir, c)}" for c in candidates
-        )
+        ) + "\n  *{id}.out, *{us}.out (glob)".format(id=job_id, us=job_id.replace('.', '_'))
         self._respond(404, "text/plain", msg.encode())
 
     def _send_log(self, path: str, filename: str):
@@ -1310,7 +1281,7 @@ def scrape_personal(collector_host: str, detail_user: str) -> None:
                 status = safe_int(job, "JobStatus", 0)
                 req_gpus = safe_int(job, "RequestGPUs", 0)
                 req_cpus = safe_int(job, "RequestCpus", 1)
-                req_mem_mb = safe_memory_mb(job, "RequestMemory", 0)
+                req_mem_mb = safe_int(job, "RequestMemory", 0)
                 rss_kb = safe_int(job, "ResidentSetSize", 0)
                 sched_mem_usage_mb = safe_int(job, "MemoryUsage", 0)
                 # Only count "real" memory (RSS or MemoryUsage), not the
@@ -1479,7 +1450,7 @@ def main():
     args = parser.parse_args()
 
     log.info("Starting Stoomboot GPU+CPU Prometheus exporter")
-    log.info(f"  bindings:       {HTCONDOR_BINDINGS}")
+    log.info(f"  bindings:       {_binding}")
     log.info(f"  port:           {args.port}")
     log.info(f"  collector:      {args.collector}")
     log.info(f"  personal user:  {args.detail_user} (fast loop every {args.interval}s)")
