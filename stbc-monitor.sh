@@ -245,7 +245,6 @@ open_browser() {
 
 # ── Actions ───────────────────────────────────────────────────────────────────
 ACTION="start"
-FULL_MODE=false
 for _arg in "$@"; do
     case "$_arg" in
         --setup)   ACTION="setup" ;;
@@ -253,7 +252,6 @@ for _arg in "$@"; do
         --status)  ACTION="status" ;;
         --restart) ACTION="restart" ;;
         --logs)    ACTION="logs" ;;
-        --full)    FULL_MODE=true ;;
         -h|--help)
             sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -287,8 +285,7 @@ case "$ACTION" in
             --port-prometheus ${PORT_PROMETHEUS} \
             --default-user '${CLUSTER_USER}' \
             --log-dir '${LOG_DIR}' \
-            --log-port '${PORT_LOG}' \
-            $( $FULL_MODE && echo '--full' )"
+            --log-port '${PORT_LOG}'"
         # Read back the actual port chosen by setup.sh (may differ if requested port was busy)
         _actual_port=$(ssh "${ssh_opts[@]}" "$SSH_TARGET" \
             "cat '${REMOTE_DIR}/pids/prometheus.port' 2>/dev/null" 2>/dev/null | tr -d '[:space:]')
@@ -325,8 +322,7 @@ case "$ACTION" in
             --port-prometheus ${PORT_PROMETHEUS} \
             --default-user '${CLUSTER_USER}' \
             --log-dir '${LOG_DIR}' \
-            --log-port '${PORT_LOG}' \
-            $( $FULL_MODE && echo '--full' )"
+            --log-port '${PORT_LOG}'"
         stop_local_grafana
         start_local_grafana
         info "Services restarted. Run ./stbc-monitor.sh to view."

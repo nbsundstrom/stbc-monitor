@@ -108,18 +108,16 @@ bar.
 
 Every metric carries a `cluster="gpu"` or `cluster="cpu"` label.
 
-**Per user (both clusters, everyone):** running vs queued jobs, compute units
-held (GPUs or CPU cores), compute-seconds in flight, memory efficiency
-(actual / requested).
+**Per user (detail user only, both clusters):** running vs queued jobs, compute
+units held (GPUs on the gpu cluster, CPU cores on the cpu cluster).
 
-**Cluster-wide (both clusters):** utilisation per GPU type (L40S / V100 / MI50)
-and for CPU cores, claimed vs idle units.
+**Per job:** wall-clock duration, GPUs requested, VRAM allocated, memory
+requested vs actual, CPU efficiency, GPU utilisation. All tracked for the
+configured `CLUSTER_USER` (`--detail-user`).
 
-**Per job:** wall-clock duration, GPUs/CPUs requested, memory requested vs
-actual. GPU jobs are tracked for **everyone** (small cluster → the leaderboard
-shows who's hogging GPUs); CPU per-job detail is tracked **only for your user**
-(set via `CLUSTER_USER`) to keep Prometheus cardinality sane given the CPU
-cluster can have thousands of jobs.
+**Real-time path:** GPU utilisation, memory, and CPU efficiency come from
+HTCondor Startd ClassAds (1-5 min update interval, cached 15s) since
+node_exporter on the workers isn't reachable from the login node.
 
 ---
 

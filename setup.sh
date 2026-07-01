@@ -37,10 +37,8 @@ PORT_EXPORTER=9118
 PORT_PROMETHEUS=9090
 PORT_LOG=9119
 INTERVAL=15
-DEFAULT_USER="your_username"  # pinned as the default in the Grafana user dropdown,
-                               # and the user whose CPU jobs get per-job detail
+DEFAULT_USER="your_username"  # pinned as the default in the Grafana user dropdown
 JOB_LOG_DIR=""                 # directory with .out job log files; empty = no log server
-FULL_MODE=true                 # enable cluster-wide monitoring
 
 PROM_SIF="${REPO_DIR}/prometheus.sif"
 PROM_DATA="${REPO_DIR}/prom_data"
@@ -77,7 +75,6 @@ while [[ $# -gt 0 ]]; do
         --python)           PYTHON_BIN="$2"; shift 2 ;;
         --default-user)     DEFAULT_USER="$2"; shift 2 ;;
         --log-dir)          JOB_LOG_DIR="$2"; shift 2 ;;
-        --full)             FULL_MODE=true; shift ;;
         *) error "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -101,15 +98,6 @@ resolve_htcondor_module() {
     return 1
 }
 
-kill_by_port() {
-    local port="$1"
-    local pids
-    pids=$(fuser "${port}/tcp" 2>/dev/null) || return 0
-    for p in $pids; do
-        kill "$p" 2>/dev/null || true
-    done
-}
-
 stop_process() {
     local name="$1" pidfile="$2" port="${3:-}"
     if is_running "$pidfile"; then
@@ -117,15 +105,6 @@ stop_process() {
         rm -f "$pidfile"
     else
         info "$name not running via pid file"
-    fi
-    # Always sweep the port — catches orphaned processes the pid file missed
-    if [[ -n "$port" ]]; then
-        local pids
-        pids=$(fuser "${port}/tcp" 2>/dev/null) || true
-        if [[ -n "$pids" ]]; then
-            warn "Port ${port} still occupied (${pids}) — killing..."
-            kill_by_port "$port"
-        fi
     fi
     rm -f "$pidfile"
 }
@@ -315,11 +294,6 @@ else
     echo "$PORT_PROMETHEUS" > "${PID_DIR}/prometheus.port"
 fi
 
-# If a log server is configured, nuke any stale process on that port first
-if [[ -n "$JOB_LOG_DIR" ]]; then
-    kill_by_port "$PORT_LOG" || true
-fi
-
 # Helper: ensure a process is running. By default skips if already up;
 # with FORCE_RESTART=true it kills and relaunches.
 # stdin is detached (< /dev/null) so this survives an ssh session closing.
@@ -350,7 +324,6 @@ _exporter_args=(
     --detail-user "${DEFAULT_USER}"
 )
 [[ -n "$JOB_LOG_DIR" ]] && _exporter_args+=(--log-dir "${JOB_LOG_DIR}" --log-port "${PORT_LOG}")
-$FULL_MODE && _exporter_args+=(--full)
 
 launch "exporter" "$EXPORTER_PID" "$EXPORTER_LOG" \
     "${PYTHON_BIN}" "${REPO_DIR}/stoomboot_gpu_exporter.py" \

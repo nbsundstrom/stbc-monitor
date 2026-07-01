@@ -3,19 +3,6 @@ import sys
 import types
 
 
-class _MockAd:
-    """Mock ClassAd — supports .get(), .eval(), and contains keys like a dict."""
-
-    def __init__(self, data=None):
-        self._data = dict(data or {})
-
-    def get(self, key, default=None):
-        return self._data.get(key, default)
-
-    def eval(self, key):
-        return self._data.get(key)
-
-
 def _install_mock(name, attrs=None):
     mod = types.ModuleType(name)
     for k, v in (attrs or {}).items():
